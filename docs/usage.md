@@ -1,0 +1,155 @@
+# disk2glance: инструкция по использованию
+
+## 0. Что понадобится
+
+- Linux-ВМ, которую нужно перенести (x86_64, диск с разделами, ФС ext4/ext3/xfs), с доступом root.
+- Исходящий HTTPS с этой ВМ до Keystone и Glance целевого облака (в VK Cloud это
+  `infra.mail.ru:35357` и `infra.mail.ru:9292`).
+- Учётная запись в целевом проекте с правом создавать образы. Лучше отдельная сервисная
+  учётка: её пароль будет лежать на переносимой ВМ, пока идёт миграция.
+- Бандл `disk2glance-<версия>.tar.gz`, в котором есть модуль под ядро ВМ (`uname -r`).
+  Список ядер есть в `modules/` бандла и в [../THIRD_PARTY.md](../THIRD_PARTY.md).
+  Если нужного ядра нет, см. [build-modules.md](build-modules.md).
+
+## 1. Подготовить конфигурацию
+
+`openrc`: учётные данные, шаблон в [../examples/openrc.example](../examples/openrc.example).
+
+```bash
+export OS_AUTH_URL="https://infra.mail.ru:35357/v3/"
+export OS_PROJECT_ID="<id проекта>"
+export OS_REGION_NAME="RegionOne"
+export OS_USERNAME="<сервисный пользователь>"
+export OS_USER_DOMAIN_NAME="<домен пользователя>"
+export OS_PASSWORD="<пароль>"
+```
+
+`props.json`: свойства будущего образа. Их стоит взять у образа, из которого
+создавалась исходная ВМ, или у близкого образа целевого облака:
+
+```bash
+openstack image show <похожий образ> -f json -c properties
+```
+
+Нужны ключи `os_distro`, `os_type`, `os_admin_user`, `hw_*`; служебные ключи
+(`os_hash_*`, `owner_*`, `stores` и т. п.) брать не надо. Пример лежит в
+[../examples/props-ubuntu24.json](../examples/props-ubuntu24.json). Для UEFI-ВМ добавьте
+`"hw_firmware_type": "uefi"` и `"hw_machine_type": "q35"`.
+
+## 2. Установить агент на переносимую ВМ
+
+**Офлайн** (архив уже на диске ВМ):
+
+```bash
+tar xzf disk2glance-0.2.0.tar.gz
+cd disk2glance-0.2.0
+sudo ./install.sh --openrc /path/to/openrc --props /path/to/props.json
+```
+
+**Онлайн** (ВМ сама скачивает архив):
+
+```bash
+curl -fsSL <url>/install.sh | sudo D2G_BUNDLE_URL=<url>/disk2glance-0.2.0.tar.gz bash
+```
+
+Если рядом лежит `<архив>.sha256`, установщик сверяет контрольную сумму архива.
+
+Что делает установщик:
+- проверяет архитектуру, наличие нужных команд, Secure Boot, kernel lockdown, ЗПС Astra;
+- ищет модуль под `uname -r`, сверяет sha256 и `vermagic`;
+- копирует всё в `/opt/disk2glance`, создаёт ссылки `/usr/local/sbin/disk2glance` и `/usr/sbin/disk2glance` (на RHEL-подобных `sudo` не видит `/usr/local/sbin`);
+- один раз загружает и выгружает модуль для проверки. **В автозагрузку модуль не ставится.**
+
+Если готового модуля нет, а на ВМ есть `gcc`, `make` и заголовки ядра, можно собрать модуль
+прямо там: `sudo ./install.sh --build`. На рабочих ВМ так обычно не делают, лучше собрать
+модуль на сборочной ВМ.
+
+## 3. Проверка перед переносом
+
+```bash
+sudo disk2glance --check
+```
+
+Проверка ничего не загружает. Она проверяет учётные данные, доступность Glance, разметку
+диска (что пойдёт через снапшот, что будет прочитано как есть) и загрузку модуля. Пример:
+
+```
+auth OK, Glance https://infra.mail.ru:9292
+  /dev/vda14 start=1048576 size=4194304 fs=none mnt=- -> raw
+  /dev/vda15 start=5242880 size=111149056 fs=vfat mnt=/boot/efi -> raw
+  /dev/vda16 start=116391936 size=957350400 fs=ext4 mnt=/boot -> snap
+  /dev/vda1 start=1074790400 size=20400029184 fs=ext4 mnt=/ -> snap
+dattobd 0.12.2 loaded
+CHECK OK: image would be 21474836480 bytes raw
+```
+
+## 4. Перенос
+
+```bash
+sudo disk2glance --name myvm-migr-1
+```
+
+Приложения можно не останавливать. Если важна согласованность на уровне приложения,
+остановите его или переведите в режим только чтения непосредственно перед запуском:
+снапшот делается в первые секунды работы агента.
+
+Для долгого переноса удобнее запустить агент в фоне:
+
+```bash
+sudo nohup disk2glance --name myvm-migr-1 >/var/log/d2g.out 2>/var/log/d2g.log &
+```
+
+Прогресс (если в системе есть `pv`) пишется в `/run/disk2glance/progress.log`.
+
+Успешный запуск заканчивается так:
+
+```
+upload done in 222 s (92 MiB/s): status=active size=21474836480
+OK: size and md5 match Glance
+6a8a45e5-bac7-4d93-b6ba-f3eabf2a7baf          ← id образа (stdout)
+```
+
+Коды выхода: `0` — успех, `1` — ошибка (подробности в stderr), `64` — неверные параметры.
+При любом исходе агент удаляет снапшоты и выгружает модуль, если сам его загрузил.
+
+## 5. Создать ВМ в целевом облаке
+
+```bash
+openstack server create myvm --image <id образа> --flavor <flavor> \
+  --boot-from-volume <размер ГБ ≥ размера диска> --network <сеть> \
+  --security-group <sg> --key-name <ключ> --availability-zone <AZ>
+```
+
+При первой загрузке:
+- ext4/xfs проигрывают журнал, СУБД восстанавливаются по своим журналам. На медленных дисках
+  восстановление PostgreSQL может занять минуты (end-of-recovery checkpoint).
+- cloud-init видит новый instance-id и заново настраивает сеть и SSH-ключи хоста.
+- Сервисы, которые работали на источнике, стартуют и на клоне. Если оба экземпляра не
+  должны работать одновременно, остановите источник или заранее учтите это в приложении.
+
+Проверить данные клона можно скриптом [../verify-clone.sh](../verify-clone.sh); он
+написан под тестовую нагрузку, но годится как образец.
+
+## 6. После переноса
+
+На источнике:
+
+```bash
+sudo /path/to/disk2glance-0.2.0/install.sh --uninstall --purge
+```
+
+Команда удаляет `/opt/disk2glance`, `/etc/disk2glance` (вместе с паролем) и выгружает модуль.
+На клоне агент тоже остался, потому что это копия диска; удалите его там той же командой.
+
+## Если что-то пошло не так
+
+| Сообщение | Причина и что делать |
+|---|---|
+| `no dattobd module for kernel X` | в бандле нет модуля под это ядро: собрать по [build-modules.md](build-modules.md) или `install.sh --build` |
+| `insmod ... failed` | Secure Boot, lockdown или ЗПС Astra; детали в `dmesg` |
+| `... is used by dm-0 (LVM/RAID/crypt)` | раздел под LVM, RAID или шифрованием: в 0.2 не поддерживается |
+| `Keystone auth failed` | неверный `openrc` или нет доступа к `OS_AUTH_URL` |
+| `upload failed (image ... left in Glance)` | обрыв сети: удалите незаконченный образ (`openstack image delete`) и запустите заново |
+| `MISMATCH` | размер или хеш не совпали: образ не использовать, повторить перенос |
+| `another disk2glance is running` | уже идёт другой запуск; `/run/disk2glance/pid` |
+| снапшот в ошибке, в `/proc/datto-info` `"error"` | переполнился COW-файл (за время переноса изменилось больше 10% раздела): повторить при меньшей нагрузке |

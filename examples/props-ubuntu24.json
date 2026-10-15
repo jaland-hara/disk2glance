@@ -1,0 +1,8 @@
+{
+  "os_type": "linux",
+  "os_distro": "ubuntu24.04",
+  "os_version": "24.04",
+  "os_admin_user": "ubuntu",
+  "hw_vif_model": "virtio",
+  "hw_qemu_guest_agent": "yes"
+}
