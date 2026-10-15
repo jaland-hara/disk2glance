@@ -4,7 +4,8 @@
 #
 # Usage (root): build-module.sh <kernel-version> [<kernel-version>...]
 #   e.g. build-module.sh 6.12.92-1.red80.x86_64 6.8.0-134-generic
-# Needs: gcc, make, dkms, dattobd source in $SRC (default /root/dattobd, tag $V).
+# Needs: gcc, make, git, elfutils-libelf-devel; dattobd source in $SRC (default /root/dattobd, tag $V).
+# No dkms needed: genconfig.sh + kbuild are run directly, as root.
 set -euo pipefail
 V=${V:-0.12.2}
 SRC=${SRC:-/root/dattobd}
@@ -39,19 +40,18 @@ prep_headers() { # kver: headers + System.map for genconfig
   [ -d "/lib/modules/$k/build" ] || { log "no headers for $k"; return 1; }
 }
 
-mkdir -p /usr/src/dattobd-$V
-cp -r "$SRC"/src/* /usr/src/dattobd-$V/
-sed "s/@MODULE_VERSION@/$V/" "$SRC/dist/dattobd-dkms-conf" > /usr/src/dattobd-$V/dkms.conf
-[ -d /var/lib/dkms/dattobd/$V ] || dkms add dattobd/$V >/dev/null
-
 for k in "$@"; do
   log "== $k"
   prep_headers "$k"
-  dkms build dattobd/$V -k "$k" --force >/tmp/build-$k.log 2>&1 || { tail -20 /tmp/build-$k.log; exit 1; }
-  ko=$(find /var/lib/dkms/dattobd/$V/"$k" -name 'dattobd.ko*' | head -1)
+  # same steps as dattobd's dkms.conf (PRE_BUILD genconfig.sh + kbuild), without needing dkms
+  B=$(mktemp -d); cp -r "$SRC"/src/. "$B/"
+  ( cd "$B" && make clean >/dev/null 2>&1 || true
+    ./genconfig.sh "$k" && make -C "/lib/modules/$k/build" M="$B" KVER="$k" modules ) >/tmp/build-$k.log 2>&1 \
+    || { tail -20 /tmp/build-$k.log; exit 1; }
   mkdir -p "$OUT/$k"
-  case $ko in *.zst) zstd -qdc "$ko";; *.xz) xz -dc "$ko";; *) cat "$ko";; esac > "$OUT/$k/dattobd.ko"
+  cp "$B/dattobd.ko" "$OUT/$k/dattobd.ko"
   strip --strip-debug "$OUT/$k/dattobd.ko"
   (cd "$OUT/$k" && sha256sum dattobd.ko > dattobd.ko.sha256)
   log "   $(modinfo -F vermagic "$OUT/$k/dattobd.ko") -> $OUT/$k/dattobd.ko"
+  rm -rf "$B"
 done

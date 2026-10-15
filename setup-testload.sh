@@ -10,16 +10,19 @@ if command -v apt-get >/dev/null; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql postgresql-contrib >/dev/null
   PGSVC=postgresql
 else
-  dnf -y -q install postgresql-server postgresql-contrib >/dev/null
-  [ -f /var/lib/pgsql/data/PG_VERSION ] || postgresql-setup --initdb >/dev/null
+  "$(command -v dnf || command -v yum)" -y -q install postgresql-server postgresql-contrib >/dev/null
+  [ -f /var/lib/pgsql/data/PG_VERSION ] || postgresql-setup --initdb >/dev/null 2>&1 || postgresql-setup initdb >/dev/null
   PGSVC=postgresql
   systemctl enable --now postgresql >/dev/null 2>&1
 fi
 PGBENCH=$(command -v pgbench || ls /usr/lib/postgresql/*/bin/pgbench /usr/pgsql-*/bin/pgbench 2>/dev/null | head -1)
+# pgbench < 9.4 (CentOS 7 ships 9.2) has no --rate/--progress: fall back to 1 client, unthrottled
+if "$PGBENCH" --help 2>&1 | grep -q -- '--rate'; then BENCHOPTS="-c 4 -j 2 -R $RATE -P 30"
+else BENCHOPTS="-c 1 -j 1"; fi
 
 cd /
 sudo -u postgres psql -qc "create database bench" 2>/dev/null || true
-sudo -u postgres "$PGBENCH" -i -s "$SCALE" -q bench 2>&1 | tail -1
+sudo -u postgres "$PGBENCH" -i -s "$SCALE" bench 2>&1 | tail -1   # no -q: pgbench 9.2
 sudo -u postgres psql -q bench -c "create table if not exists ticks(seq bigint primary key, ts timestamptz default now())"
 
 mkdir -p /var/lib/tsw
@@ -55,7 +58,7 @@ After=$PGSVC.service
 [Service]
 User=postgres
 WorkingDirectory=/tmp
-ExecStart=$PGBENCH -c 4 -j 2 -R $RATE -T 31536000 -P 30 bench
+ExecStart=$PGBENCH $BENCHOPTS -T 31536000 bench
 Restart=always
 [Install]
 WantedBy=multi-user.target

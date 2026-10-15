@@ -19,10 +19,10 @@
 Нужна одна ВМ на каждый дистрибутив (RED OS 7.3, RED OS 8, Ubuntu 24.04, Astra 1.7, …):
 
 ```bash
-# RED OS / CentOS
-sudo dnf -y install gcc make dkms elfutils-libelf-devel git
+# RED OS / CentOS (на CentOS 7 вместо dnf — yum)
+sudo dnf -y install gcc make elfutils-libelf-devel git
 # Ubuntu / Debian / Astra
-sudo apt-get install -y build-essential dkms libelf-dev git
+sudo apt-get install -y build-essential libelf-dev git
 ```
 
 ## Сборка
@@ -37,7 +37,9 @@ sudo bash build-module.sh 6.12.92-1.red80.x86_64 6.12.101-1.red80.x86_64
 2. кладёт `System.map` в `/boot`: на RHEL-подобных берёт из devel-пакета, на Ubuntu
    извлекает из `linux-modules-<ver>`;
 3. если ядро не установлено, создаёт ссылку `/lib/modules/<ver>/build`;
-4. выполняет `dkms build dattobd/0.12.2 -k <ver>` и вызывает `genconfig.sh` под root;
+4. копирует исходники во временный каталог, выполняет `genconfig.sh <ver>` и
+   `make -C /lib/modules/<ver>/build M=… modules` под root (те же шаги, что в dkms.conf
+   dattobd, но без самого dkms: на CentOS 7 его нет в базовых репозиториях);
 5. кладёт `modules/<ver>/dattobd.ko` (без отладочной информации) и `dattobd.ko.sha256`.
 
 Исходники берутся из `/root/dattobd` (тег `v0.12.2`); если их нет, скрипт склонирует их с GitHub.

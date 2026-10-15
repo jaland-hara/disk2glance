@@ -19,7 +19,7 @@
 dattobd лежат в бандле (`src/dattobd`), исходники glibc 2.39 доступны в архиве Ubuntu
 (`apt-get source glibc` на Ubuntu 24.04), поэтому перелинковка возможна.
 
-Контрольные суммы (sha256) бинарников версии 0.2.0:
+Контрольные суммы (sha256) бинарников (не менялись с 0.2.0):
 
 ```
 ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
@@ -30,7 +30,7 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 У каждого модуля рядом лежит `dattobd.ko.sha256`. `install.sh` проверяет его и сверяет
 `vermagic` модуля с `uname -r`.
 
-### Готовые модули (бандл 0.2.0)
+### Готовые модули (бандл 0.3.0)
 
 | Ядро | Дистрибутив | Где собран | Пакеты для сборки (из репозиториев дистрибутива) |
 |---|---|---|---|
@@ -40,6 +40,7 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 | `6.12.101-1.red80.x86_64` | RED OS 8 | на сборочной ВМ RED OS 8 (кросс-сборка, ядро на ВМ не установлено) | то же + `kernel-lt-devel-6.12.101-1.red80` |
 | `6.1.175-1.el7.3.x86_64` | RED OS 7.3 | на ВМ с этим ядром (exp-redos73) | `gcc`, `make`, `dkms`, `elfutils-libelf-devel`, `kernel-lt-devel-6.1.175-1.el7.3` — репозитории RED OS (`base`, `updates`, `kernels6`) |
 | `6.1.180-1.el7.3.x86_64` | RED OS 7.3 | на сборочной ВМ RED OS 7.3 (кросс-сборка) | то же + `kernel-lt-devel-6.1.180-1.el7.3` |
+| `3.10.0-1160.119.1.el7.x86_64` | CentOS 7.9 | на сборочной ВМ CentOS 7 (`build-module.sh`, без dkms) | `gcc`, `make`, `git`, `elfutils-libelf-devel`, `kernel-devel-3.10.0-1160.119.1.el7` — репозитории CentOS 7 (`updates`, vault.centos.org) |
 
 Модули подписаны локальными ключами DKMS сборочных ВМ, но `strip` удаляет подпись. При
 выключенном Secure Boot это не важно. При включённом модуль нужно подписать ключом, который
@@ -53,6 +54,8 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 | `curl` | curl | Keystone и Glance API, потоковая загрузка (`PUT -T -`, chunked) |
 | `dd`, `tee`, `md5sum`, `sha512sum`, `sort`, `date` | coreutils | чтение диска по смещениям, контрольные суммы |
 | `findmnt`, `flock` | util-linux | точки монтирования и ФС разделов, защита от параллельного запуска |
+| `dmsetup` (только при LVM) | device-mapper (ставится вместе с lvm2) | таблица сегментов LV: где экстенты LV лежат на диске |
+| `sync` | coreutils | сброс грязных данных перед снапшотом |
 | `insmod`, `rmmod`, `modinfo` | kmod | загрузка и выгрузка dattobd |
 | `pv` (необязательно) | pv | прогресс загрузки (`/run/disk2glance/progress.log`) |
 
@@ -60,7 +63,8 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 
 ## 3. Что используется только при сборке (на сборочной ВМ, не на мигрируемой)
 
-- `gcc`, `make`, `dkms`, `elfutils-libelf-devel` / `libelf-dev`.
+- `gcc`, `make`, `elfutils-libelf-devel` / `libelf-dev`, `git`. dkms не нужен: `build-module.sh`
+  сам выполняет те же шаги (`genconfig.sh` под root и kbuild).
 - Заголовки ядра: `kernel-lt-devel-<ver>` (RED OS), `kernel-devel-<ver>` (CentOS), `linux-headers-<ver>` (Ubuntu/Astra).
 - `System.map` нужного ядра. На RHEL-подобных системах он входит в `kernel-*-devel`
   (`/usr/src/kernels/<ver>/System.map`), на Ubuntu — в `linux-modules-<ver>`.

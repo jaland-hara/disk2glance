@@ -2,7 +2,8 @@
 
 ## 0. Что понадобится
 
-- Linux-ВМ, которую нужно перенести (x86_64, диск с разделами, ФС ext4/ext3/xfs), с доступом root.
+- Linux-ВМ, которую нужно перенести (x86_64, диск с разделами, ФС ext4/ext3/xfs прямо на
+  разделах или на линейных томах LVM), с доступом root.
 - Исходящий HTTPS с этой ВМ до Keystone и Glance целевого облака (в VK Cloud это
   `infra.mail.ru:35357` и `infra.mail.ru:9292`).
 - Учётная запись в целевом проекте с правом создавать образы. Лучше отдельная сервисная
@@ -41,21 +42,21 @@ openstack image show <похожий образ> -f json -c properties
 **Офлайн** (архив уже на диске ВМ):
 
 ```bash
-tar xzf disk2glance-0.2.0.tar.gz
-cd disk2glance-0.2.0
+tar xzf disk2glance-0.3.0.tar.gz
+cd disk2glance-0.3.0
 sudo ./install.sh --openrc /path/to/openrc --props /path/to/props.json
 ```
 
 **Онлайн** (ВМ сама скачивает архив из GitHub Releases):
 
 ```bash
-R=https://github.com/jaland-hara/disk2glance/releases/download/v0.2.0
+R=https://github.com/jaland-hara/disk2glance/releases/download/v0.3.0
 curl -fsSL $R/install.sh -o /tmp/d2g-install.sh
-sudo D2G_BUNDLE_URL=$R/disk2glance-0.2.0.tar.gz bash /tmp/d2g-install.sh --openrc /path/to/openrc --props /path/to/props.json
+sudo D2G_BUNDLE_URL=$R/disk2glance-0.3.0.tar.gz bash /tmp/d2g-install.sh --openrc /path/to/openrc --props /path/to/props.json
 ```
 
-Скачать архив для офлайн-установки можно там же: `$R/disk2glance-0.2.0.tar.gz`, контрольная
-сумма лежит в `$R/disk2glance-0.2.0.tar.gz.sha256`.
+Скачать архив для офлайн-установки можно там же: `$R/disk2glance-0.3.0.tar.gz`, контрольная
+сумма лежит в `$R/disk2glance-0.3.0.tar.gz.sha256`.
 
 Если рядом лежит `<архив>.sha256`, установщик сверяет контрольную сумму архива.
 
@@ -88,6 +89,15 @@ dattobd 0.12.2 loaded
 CHECK OK: image would be 21474836480 bytes raw
 ```
 
+На CentOS 7 с LVM:
+
+```
+  /dev/vda1 start=1048576 size=1073741824 fs=xfs mnt=/boot -> snap
+  /dev/vda2 start=1074790400 size=20400046080 -> container for: dm-0 dm-1
+    LV centos-root fs=xfs mnt=/ segments=1 -> snap
+    LV centos-swap fs=none mnt=- segments=1 -> raw
+```
+
 ## 4. Перенос
 
 ```bash
@@ -97,6 +107,21 @@ sudo disk2glance --name myvm-migr-1
 Приложения можно не останавливать. Если важна согласованность на уровне приложения,
 остановите его или переведите в режим только чтения непосредственно перед запуском:
 снапшот делается в первые секунды работы агента.
+
+Параметры:
+
+| Параметр | Что делает |
+|---|---|
+| `--name NAME` | имя образа (по умолчанию `<hostname>-<дата-время>`) |
+| `--disk /dev/vdX` | какой диск переносить (по умолчанию `/dev/vda`) |
+| `--cow-mb N` | размер COW-файла на каждый снапшот, МиБ (по умолчанию 10% тома). Меньше — короче пауза записи при создании снапшота на нагруженном диске, но COW быстрее переполняется. См. [how-it-works.md](how-it-works.md#пауза-записи-при-создании-снапшота) |
+| `--check` | только проверка, без снапшотов и загрузки |
+| `--keep-module` | не выгружать dattobd после работы |
+
+Во время создания снапшотов **запись приложений на диск на короткое время
+приостанавливается**: обычно на 1–3 с, на сильно нагруженных медленных дисках до
+десятков секунд. Это свойство механизма заморозки ФС; подробности и замеры в
+[how-it-works.md](how-it-works.md#пауза-записи-при-создании-снапшота).
 
 Для долгого переноса удобнее запустить агент в фоне:
 
@@ -140,7 +165,7 @@ openstack server create myvm --image <id образа> --flavor <flavor> \
 На источнике:
 
 ```bash
-sudo /path/to/disk2glance-0.2.0/install.sh --uninstall --purge
+sudo /path/to/disk2glance-0.3.0/install.sh --uninstall --purge
 ```
 
 Команда удаляет `/opt/disk2glance`, `/etc/disk2glance` (вместе с паролем) и выгружает модуль.
@@ -152,7 +177,9 @@ sudo /path/to/disk2glance-0.2.0/install.sh --uninstall --purge
 |---|---|
 | `no dattobd module for kernel X` | в бандле нет модуля под это ядро: собрать по [build-modules.md](build-modules.md) или `install.sh --build` |
 | `insmod ... failed` | Secure Boot, lockdown или ЗПС Astra; детали в `dmesg` |
-| `... is used by dm-0 (LVM/RAID/crypt)` | раздел под LVM, RAID или шифрованием: в 0.2 не поддерживается |
+| `... holds dm-crypt device` / `only LVM is supported` | раздел зашифрован или под mdraid/multipath: не поддерживается |
+| `LV ... has a 'thin-pool' segment` (или raid, striped) | нелинейный LV: не поддерживается |
+| `VG spans disks` | группа томов на нескольких дисках: не поддерживается |
 | `Keystone auth failed` | неверный `openrc` или нет доступа к `OS_AUTH_URL` |
 | `upload failed (image ... left in Glance)` | обрыв сети: удалите незаконченный образ (`openstack image delete`) и запустите заново |
 | `MISMATCH` | размер или хеш не совпали: образ не использовать, повторить перенос |

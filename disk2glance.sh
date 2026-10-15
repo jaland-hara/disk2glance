@@ -1,12 +1,15 @@
 #!/bin/bash
 # disk2glance — stream a live Linux disk into an OpenStack Glance image (raw), no temp files.
 #
-# Mounted ext4/ext3/xfs partitions are read from dattobd copy-on-write snapshots
-# (crash-consistent, taken back to back); everything else (partition table, BIOS
-# boot, EFI, swap, gaps, GPT backup) is read straight from the disk.
+# Mounted ext4/ext3/xfs filesystems — on partitions or on linear LVM volumes — are
+# read from dattobd copy-on-write snapshots (crash-consistent, taken back to back);
+# everything else (partition table, BIOS boot, EFI, swap, LVM metadata, free
+# extents, gaps, GPT backup) is read straight from the disk.
 #
-# Usage: disk2glance [--check] [--disk /dev/vda] [--name NAME] [--keep-module]
+# Usage: disk2glance [--check] [--disk /dev/vda] [--name NAME] [--cow-mb N] [--keep-module]
 #   --check        preflight only: auth, Glance endpoint, layout, module load; no upload
+#   --cow-mb N     COW file size per snapshot in MiB (default: dattobd's 10% of the volume);
+#                  smaller = shorter write pause at snapshot time on busy disks, but overflows sooner
 #   --keep-module  leave dattobd loaded afterwards (default: unload if we loaded it)
 # Config: /etc/disk2glance/openrc (OS_* variables), /etc/disk2glance/props.json (image properties)
 set -euo pipefail
@@ -20,13 +23,15 @@ PROPS=${PROPS:-/etc/disk2glance/props.json}
 NAME=
 CHECK=0
 KEEP_MODULE=0
+COW_MB=
 while [ $# -gt 0 ]; do
   case $1 in
     --check) CHECK=1 ;;
     --disk) DISK=$2; shift ;;
     --name) NAME=$2; shift ;;
     --keep-module) KEEP_MODULE=1 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    --cow-mb) COW_MB=$2; shift ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     -*) echo "unknown option $1" >&2; exit 64 ;;
     *) NAME=$1 ;;
   esac
@@ -88,22 +93,76 @@ while read -r start size node; do PARTS+=("$start $size $node"); done < <(
   done | sort -n)
 [ ${#PARTS[@]} -gt 0 ] || die "no partitions on $DISK (whole-disk filesystems are not supported yet)"
 
-declare -A PLAN   # node -> snap|raw
+# --- plan: which block devices to snapshot and where their bytes live on the disk ---
+# TARGETS: "dev mnt" to snapshot (a partition, or an LVM logical volume)
+# MAPS:    "dev dev_off len disk_off" — byte ranges of a target as they sit on $DISK
+TARGETS=()
+MAPS=()
+declare -A PART_START   # "maj:min" of each partition -> start byte on $DISK
+for p in "${PARTS[@]}"; do
+  read -r start size node <<<"$p"
+  PART_START[$(cat /sys/class/block/$(basename "$node")/dev)]=$start
+done
+
+fs_of() { # dev -> "mnt fstype" (empty if not mounted)
+  findmnt -rn -S "$1" -o TARGET,FSTYPE | head -1
+}
+plan_fs() { # dev fstype mnt label -> 0 if it must be snapshotted
+  case "${2:-}" in
+    ext4|ext3|xfs) return 0 ;;
+    btrfs) die "$4 is btrfs (mounted at $3) — not supported (dattobd has no btrfs support)" ;;
+    *) return 1 ;;
+  esac
+}
+
+declare -A SEEN_DM
 for p in "${PARTS[@]}"; do
   read -r start size node <<<"$p"
   pname=$(basename "$node")
-  if [ -n "$(ls -A /sys/class/block/$pname/holders 2>/dev/null)" ]; then
-    die "$node is used by $(ls /sys/class/block/$pname/holders | tr '\n' ' ')(LVM/RAID/crypt) — not supported yet"
+  holders=$(ls /sys/class/block/$pname/holders 2>/dev/null | tr '\n' ' ')
+  if [ -z "${holders// }" ]; then
+    mnt=; fstype=
+    read -r mnt fstype < <(fs_of "$node") || true
+    if plan_fs "$node" "${fstype:-}" "${mnt:-}" "$node"; then
+      TARGETS+=("$node $mnt"); MAPS+=("$node 0 $size $start"); how=snap
+    else how=raw; fi
+    log "  $node start=$start size=$size fs=${fstype:-none} mnt=${mnt:--} -> $how"
+    continue
   fi
-  mnt=; fstype=
-  read -r mnt fstype < <(findmnt -rn -S "$node" -o TARGET,FSTYPE | head -1) || true
-  case "${fstype:-}" in
-    ext4|ext3|xfs) PLAN[$node]=snap ;;
-    btrfs) die "$node is btrfs (mounted at $mnt) — not supported yet" ;;
-    *) PLAN[$node]=raw ;;
-  esac
-  log "  $node start=$start size=$size fs=${fstype:-none} mnt=${mnt:--} -> ${PLAN[$node]}"
+  # partition is used by device-mapper: only LVM linear volumes on this disk are supported
+  log "  $node start=$start size=$size -> container for: $holders"
+  for h in $holders; do
+    [ -n "${SEEN_DM[$h]:-}" ] && continue; SEEN_DM[$h]=1
+    uuid=$(cat /sys/class/block/$h/dm/uuid 2>/dev/null || true)
+    name=$(cat /sys/class/block/$h/dm/name 2>/dev/null || echo "$h")
+    case $uuid in
+      LVM-*) ;;
+      CRYPT-*) die "$node holds dm-crypt device $name — encrypted volumes are not supported" ;;
+      *) die "$node is used by $h ($name, ${uuid%%-*}) — only LVM is supported (no mdraid/multipath)" ;;
+    esac
+    [ -z "$(ls -A /sys/class/block/$h/holders 2>/dev/null)" ] || die "LV $name is itself used by $(ls /sys/class/block/$h/holders | tr '\n' ' ')— nested device-mapper not supported"
+    command -v dmsetup >/dev/null || die "dmsetup not found (device-mapper package)"
+    lvdev=/dev/mapper/$name
+    mnt=; fstype=
+    read -r mnt fstype < <(fs_of "$lvdev") || true
+    if plan_fs "$lvdev" "${fstype:-}" "${mnt:-}" "LV $name"; then
+      while read -r s l target dmaj off rest; do
+        [ "$target" = linear ] || die "LV $name has a '$target' segment — only linear LVs are supported (no thin/raid/striped/snapshot)"
+        ps=${PART_START[$dmaj]:-}
+        [ -n "$ps" ] || die "LV $name has extents on $dmaj, which is not a partition of $DISK (VG spans disks)"
+        MAPS+=("$lvdev $((s*512)) $((l*512)) $((ps + off*512))")
+      done < <(dmsetup table "$name")
+      TARGETS+=("$lvdev $mnt"); how=snap
+    else
+      # not snapshotted (swap, unmounted): its bytes are read from the disk as they are
+      dmsetup table "$name" | awk '$3!="linear"{bad=1} END{exit bad}' \
+        || log "    note: LV $name is not linear; read raw, unmounted/swap so content is not critical"
+      how=raw
+    fi
+    log "    LV $name fs=${fstype:-none} mnt=${mnt:--} segments=$(dmsetup table "$name" | wc -l) -> $how"
+  done
 done
+[ ${#TARGETS[@]} -gt 0 ] || log "WARN: nothing to snapshot — the disk will be read as is (inconsistent if mounted rw)"
 
 load_module
 log "dattobd $(jq -r .version /proc/datto-info) loaded"
@@ -129,33 +188,44 @@ trap cleanup EXIT
 
 next_minor() { local m=0; while [ -e "/dev/datto$m" ]; do m=$((m+1)); done; echo $m; }
 
+# Flush dirty data first: dattobd freezes the filesystem while it sets up the snapshot,
+# and on a busy disk the freeze-time flush is what stalls application writes (measured:
+# 17-26 s without, ~11 s with sync, ~6 s with sync + 256 MiB COW on a loaded ceph-hdd).
+t0=$(date +%s); sync; log "sync before snapshots: $(( $(date +%s) - t0 )) s"
+COWOPT=(); [ -n "$COW_MB" ] && COWOPT=(-f "$COW_MB")
 T_SNAP=$(date -u +%FT%T.%3NZ)
-for p in "${PARTS[@]}"; do
-  read -r _ _ node <<<"$p"
-  [ "${PLAN[$node]}" = snap ] || continue
-  mnt=$(findmnt -rn -S "$node" -o TARGET | head -1)
+for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
+  read -r tdev tmnt <<<"$t"
   m=$(next_minor)
-  dbdctl setup-snapshot "$node" "${mnt%/}/$COW" "$m" || die "setup-snapshot $node failed"
-  MINORS+=("$m"); SNAPDEV[$node]=/dev/datto$m
-  log "snapshot $node ($mnt) -> /dev/datto$m"
+  t0=$(date +%s%N)
+  dbdctl setup-snapshot ${COWOPT[@]+"${COWOPT[@]}"} "$tdev" "${tmnt%/}/$COW" "$m" || die "setup-snapshot $tdev failed"
+  MINORS+=("$m"); SNAPDEV[$tdev]=/dev/datto$m
+  log "snapshot $tdev ($tmnt) -> /dev/datto$m in $(( ($(date +%s%N) - t0) / 1000000 )) ms"
 done
 T_READY=$(date -u +%FT%T.%3NZ)
 
 # --- raw disk stream -------------------------------------------------------------
+# OVL: "disk_off len src src_off" sorted by disk_off; everything else comes from $DISK
+OVL=()
+while read -r doff len src soff; do OVL+=("$doff $len $src $soff"); done < <(
+  for m in ${MAPS[@]+"${MAPS[@]}"}; do
+    read -r tdev toff tlen doff <<<"$m"
+    echo "$doff $tlen ${SNAPDEV[$tdev]} $toff"
+  done | sort -n)
 emit() { # src offset length
   [ "$3" -gt 0 ] || return 0
   dd if="$1" bs=4M iflag=skip_bytes,count_bytes,fullblock skip="$2" count="$3" status=none
 }
 stream() {
-  local pos=0 start size node
-  for p in "${PARTS[@]}"; do
-    read -r start size node <<<"$p"
-    emit "$DISK" "$pos" $((start - pos))                     # gap / table / GPT header
-    if [ -n "${SNAPDEV[$node]:-}" ]; then emit "${SNAPDEV[$node]}" 0 "$size"
-    else emit "$DISK" "$start" "$size"; fi
-    pos=$((start + size))
+  local pos=0 doff len src soff
+  for o in ${OVL[@]+"${OVL[@]}"}; do
+    read -r doff len src soff <<<"$o"
+    [ "$doff" -ge "$pos" ] || { log "overlapping ranges at $doff"; return 1; }
+    emit "$DISK" "$pos" $((doff - pos))     # partition table, raw partitions, LVM metadata, gaps
+    emit "$src" "$soff" "$len"              # snapshotted bytes
+    pos=$((doff + len))
   done
-  emit "$DISK" "$pos" $((DISK_BYTES - pos))                  # tail incl. GPT backup
+  emit "$DISK" "$pos" $((DISK_BYTES - pos)) # rest incl. GPT backup
 }
 progress() { # pv if present, else plain pass-through
   if command -v pv >/dev/null; then pv -f -i 15 -s "$DISK_BYTES" -F '%t %r %a %p' 2>"$WORK/progress.log"

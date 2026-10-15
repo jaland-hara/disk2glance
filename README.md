@@ -1,6 +1,6 @@
 # disk2glance
 
-Агент для **живого переноса Linux-ВМ в OpenStack** (проверено на VK Cloud). Он
+Агент для **живого переноса Linux-ВМ в OpenStack** (разделы и линейный LVM) (проверено на VK Cloud). Он
 работает внутри переносимой ВМ, делает согласованные снапшоты файловых систем (dattobd) и
 одним потоком отправляет весь диск в **Glance** как raw-образ. Приложения на ВМ при этом
 продолжают работать. Из образа в целевом облаке создаётся новая ВМ.
@@ -8,10 +8,10 @@
 Нужны только архив на 2–3 МБ и доступ root. Компилятор, пакеты из репозиториев и
 вспомогательная ВМ не нужны. Модуль ядра загружается только на время переноса.
 
-Архив: [Releases](https://github.com/jaland-hara/disk2glance/releases) → `disk2glance-0.2.0.tar.gz`.
+Архив: [Releases](https://github.com/jaland-hara/disk2glance/releases) → `disk2glance-0.3.0.tar.gz`.
 
 ```bash
-tar xzf disk2glance-0.2.0.tar.gz && cd disk2glance-0.2.0
+tar xzf disk2glance-0.3.0.tar.gz && cd disk2glance-0.3.0
 sudo ./install.sh --openrc openrc --props props.json
 sudo disk2glance --check
 sudo disk2glance --name myvm-migr-1      # → id образа в Glance
@@ -49,7 +49,8 @@ sudo disk2glance --name myvm-migr-1      # → id образа в Glance
 | RED OS 8.0.3 | 6.12.21-1.red80 | собран на этой ВМ | 222 с, 92 МиБ/с | ✅ |
 | RED OS 7.3.7 | 6.1.175-1.el7.3 | собран на этой ВМ | 319 с, 64 МиБ/с (параллельно с другой загрузкой) | ✅ |
 | RED OS 8.0.3 (чистый образ) | 6.12.92-1.red80 | **собран на другой ВМ**, установлен из бандла 0.2.0 | 262 с, 78 МиБ/с | ✅ |
-| RED OS 7.3.7 (чистый образ) | 6.1.175-1.el7.3 | из бандла 0.2.0 | только `install`, `--check`, `--uninstall` | — |
+| RED OS 7.3.7 (чистый образ) | 6.1.175-1.el7.3 | из бандла 0.2.0 | `install` (офлайн и онлайн из GitHub Release), `--check`, `--uninstall` | — |
+| **CentOS 7.9, корень на LVM** (`/boot` xfs, `centos-root` xfs, `centos-swap`) | 3.10.0-1160.119.1.el7 | собран без dkms на сборочной ВМ CentOS 7 | 480 с, 42 МиБ/с (pgbench без ограничения скорости) | ✅ LVM и XFS подняты, PostgreSQL 9.2 восстановлен, данные целы |
 
 «✅» означает, что ВМ загрузилась, ext4 проиграла журнал, PostgreSQL догнал WAL, последняя
 запись совпадает с моментом снапшота, `amcheck` по индексам чистый, суммы балансов pgbench
@@ -57,5 +58,5 @@ sudo disk2glance --name myvm-migr-1      # → id образа в Glance
 
 ## Дальше
 
-Astra Linux 1.7.5 / 1.8.6, CentOS 7 (нужна поддержка LVM), Windows 10 (VSS, vTPM/BitLocker),
+Astra Linux 1.7.5 / 1.8.6, Windows 10 (VSS, vTPM/BitLocker),
 CI для сборки модулей, режим репликации в тома Cinder. Подробнее в [docs/limitations.md](docs/limitations.md).
