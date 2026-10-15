@@ -1,0 +1,12 @@
+{
+ "mcs_name": "Ubuntu 24.04",
+ "mcs_os_version": "24.04",
+ "mcs_os_distro": "ubuntu",
+ "mcs_os_type": "linux",
+ "os_distro": "ubuntu24.04",
+ "os_version": "24.04",
+ "hw_vif_model": "virtio",
+ "os_type": "linux",
+ "os_admin_user": "ubuntu",
+ "hw_qemu_guest_agent": "yes"
+}

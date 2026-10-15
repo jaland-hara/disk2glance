@@ -1,0 +1,3 @@
+openrc
+*.env
+env*.sh
