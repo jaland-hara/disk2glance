@@ -8,6 +8,8 @@
 Нужны только архив на 2–3 МБ и доступ root. Компилятор, пакеты из репозиториев и
 вспомогательная ВМ не нужны. Модуль ядра загружается только на время переноса.
 
+Архив: [Releases](https://github.com/jaland-hara/disk2glance/releases) → `disk2glance-0.2.0.tar.gz`.
+
 ```bash
 tar xzf disk2glance-0.2.0.tar.gz && cd disk2glance-0.2.0
 sudo ./install.sh --openrc openrc --props props.json
@@ -30,6 +32,7 @@ sudo disk2glance --name myvm-migr-1      # → id образа в Glance
 | `disk2glance.sh` | агент (`/opt/disk2glance/bin/disk2glance`) |
 | `install.sh` | установщик и деинсталлятор (офлайн из архива или онлайн по URL) |
 | `make-bundle.sh` | сборка `dist/disk2glance-<ver>.tar.gz` |
+| `publish-release.sh` | публикация бандла в GitHub Releases (токен из `GITHUB_TOKEN`) |
 | `build-module.sh` | сборка `dattobd.ko` под заданные ядра на сборочной ВМ |
 | `modules/<ядро>/dattobd.ko` | готовые модули (dattobd 0.12.2) |
 | `bin/` | статические `dbdctl`, `update-img` (dattobd) и `jq` 1.7.1 |

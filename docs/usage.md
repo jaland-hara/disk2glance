@@ -46,11 +46,16 @@ cd disk2glance-0.2.0
 sudo ./install.sh --openrc /path/to/openrc --props /path/to/props.json
 ```
 
-**Онлайн** (ВМ сама скачивает архив):
+**Онлайн** (ВМ сама скачивает архив из GitHub Releases):
 
 ```bash
-curl -fsSL <url>/install.sh | sudo D2G_BUNDLE_URL=<url>/disk2glance-0.2.0.tar.gz bash
+R=https://github.com/jaland-hara/disk2glance/releases/download/v0.2.0
+curl -fsSL $R/install.sh -o /tmp/d2g-install.sh
+sudo D2G_BUNDLE_URL=$R/disk2glance-0.2.0.tar.gz bash /tmp/d2g-install.sh --openrc /path/to/openrc --props /path/to/props.json
 ```
+
+Скачать архив для офлайн-установки можно там же: `$R/disk2glance-0.2.0.tar.gz`, контрольная
+сумма лежит в `$R/disk2glance-0.2.0.tar.gz.sha256`.
 
 Если рядом лежит `<архив>.sha256`, установщик сверяет контрольную сумму архива.
 
