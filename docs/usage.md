@@ -42,21 +42,21 @@ openstack image show <похожий образ> -f json -c properties
 **Офлайн** (архив уже на диске ВМ):
 
 ```bash
-tar xzf disk2glance-0.3.0.tar.gz
-cd disk2glance-0.3.0
+tar xzf disk2glance-0.4.0.tar.gz
+cd disk2glance-0.4.0
 sudo ./install.sh --openrc /path/to/openrc --props /path/to/props.json
 ```
 
 **Онлайн** (ВМ сама скачивает архив из GitHub Releases):
 
 ```bash
-R=https://github.com/jaland-hara/disk2glance/releases/download/v0.3.0
+R=https://github.com/jaland-hara/disk2glance/releases/download/v0.4.0
 curl -fsSL $R/install.sh -o /tmp/d2g-install.sh
-sudo D2G_BUNDLE_URL=$R/disk2glance-0.3.0.tar.gz bash /tmp/d2g-install.sh --openrc /path/to/openrc --props /path/to/props.json
+sudo D2G_BUNDLE_URL=$R/disk2glance-0.4.0.tar.gz bash /tmp/d2g-install.sh --openrc /path/to/openrc --props /path/to/props.json
 ```
 
-Скачать архив для офлайн-установки можно там же: `$R/disk2glance-0.3.0.tar.gz`, контрольная
-сумма лежит в `$R/disk2glance-0.3.0.tar.gz.sha256`.
+Скачать архив для офлайн-установки можно там же: `$R/disk2glance-0.4.0.tar.gz`, контрольная
+сумма лежит в `$R/disk2glance-0.4.0.tar.gz.sha256`.
 
 Если рядом лежит `<архив>.sha256`, установщик сверяет контрольную сумму архива.
 
@@ -116,6 +116,7 @@ sudo disk2glance --name myvm-migr-1
 | `--disk /dev/vdX` | какой диск переносить (по умолчанию `/dev/vda`) |
 | `--cow-mb N` | размер COW-файла на каждый снапшот, МиБ (по умолчанию 10% тома). Меньше — короче пауза записи при создании снапшота на нагруженном диске, но COW быстрее переполняется. См. [how-it-works.md](how-it-works.md#пауза-записи-при-создании-снапшота) |
 | `--check` | только проверка, без снапшотов и загрузки |
+| `--detach` | запустить отдельным systemd-юнитом (переживает выход из сессии), лог в `/var/log/disk2glance.log` |
 | `--keep-module` | не выгружать dattobd после работы |
 
 Во время создания снапшотов **запись приложений на диск на короткое время
@@ -123,11 +124,19 @@ sudo disk2glance --name myvm-migr-1
 десятков секунд. Это свойство механизма заморозки ФС; подробности и замеры в
 [how-it-works.md](how-it-works.md#пауза-записи-при-создании-снапшота).
 
-Для долгого переноса удобнее запустить агент в фоне:
+**Рекомендуемый способ — в фоне, отдельным systemd-юнитом:**
 
 ```bash
-sudo nohup disk2glance --name myvm-migr-1 >/var/log/d2g.out 2>/var/log/d2g.log &
+sudo disk2glance --detach --name myvm-migr-1
+tail -f /var/log/disk2glance.log
 ```
+
+Агент перезапускает себя через `systemd-run` и работает вне вашей SSH-сессии, поэтому
+переживает выход из неё. Это обязательно на **Astra Linux**: там systemd-logind при выходе
+из сессии завершает все её процессы (`KillUserProcesses`), и `nohup` не помогает. Перенос,
+запущенный через `nohup`, прервётся, как только закроется SSH. Статус юнита:
+`systemctl status disk2glance-<дата-время>`. Остановить перенос можно через
+`systemctl stop <юнит>`: агент корректно уберёт снапшоты и выгрузит модуль.
 
 Прогресс (если в системе есть `pv`) пишется в `/run/disk2glance/progress.log`.
 
@@ -154,6 +163,8 @@ openstack server create myvm --image <id образа> --flavor <flavor> \
 - ext4/xfs проигрывают журнал, СУБД восстанавливаются по своим журналам. На медленных дисках
   восстановление PostgreSQL может занять минуты (end-of-recovery checkpoint).
 - cloud-init видит новый instance-id и заново настраивает сеть и SSH-ключи хоста.
+  Имя хоста зависит от настроек cloud-init в образе: на Astra 1.8 клон сохранил имя
+  источника, на остальных проверенных ОС получил имя новой ВМ.
 - Сервисы, которые работали на источнике, стартуют и на клоне. Если оба экземпляра не
   должны работать одновременно, остановите источник или заранее учтите это в приложении.
 
@@ -165,7 +176,7 @@ openstack server create myvm --image <id образа> --flavor <flavor> \
 На источнике:
 
 ```bash
-sudo /path/to/disk2glance-0.3.0/install.sh --uninstall --purge
+sudo /path/to/disk2glance-0.4.0/install.sh --uninstall --purge
 ```
 
 Команда удаляет `/opt/disk2glance`, `/etc/disk2glance` (вместе с паролем) и выгружает модуль.
@@ -184,4 +195,6 @@ sudo /path/to/disk2glance-0.3.0/install.sh --uninstall --purge
 | `upload failed (image ... left in Glance)` | обрыв сети: удалите незаконченный образ (`openstack image delete`) и запустите заново |
 | `MISMATCH` | размер или хеш не совпали: образ не использовать, повторить перенос |
 | `another disk2glance is running` | уже идёт другой запуск; `/run/disk2glance/pid` |
+| в логе `Завершено` / `Terminated` после выхода из SSH | процесс убит вместе с сессией (Astra, logind `KillUserProcesses`): запускайте с `--detach` |
+| `WARN: destroy minor N failed` | снапшот не удалился (например, агент был убит `kill -9`): `sudo /opt/disk2glance/bin/dbdctl destroy N && sudo rmmod dattobd`; незаконченный образ удалить в Glance |
 | снапшот в ошибке, в `/proc/datto-info` `"error"` | переполнился COW-файл (за время переноса изменилось больше 10% раздела): повторить при меньшей нагрузке |

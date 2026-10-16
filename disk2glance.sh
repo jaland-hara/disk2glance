@@ -6,8 +6,10 @@
 # everything else (partition table, BIOS boot, EFI, swap, LVM metadata, free
 # extents, gaps, GPT backup) is read straight from the disk.
 #
-# Usage: disk2glance [--check] [--disk /dev/vda] [--name NAME] [--cow-mb N] [--keep-module]
+# Usage: disk2glance [--check] [--detach] [--disk /dev/vda] [--name NAME] [--cow-mb N] [--keep-module]
 #   --check        preflight only: auth, Glance endpoint, layout, module load; no upload
+#   --detach       run as a transient systemd unit (survives logout / logind KillUserProcesses);
+#                  log: /var/log/disk2glance.log
 #   --cow-mb N     COW file size per snapshot in MiB (default: dattobd's 10% of the volume);
 #                  smaller = shorter write pause at snapshot time on busy disks, but overflows sooner
 #   --keep-module  leave dattobd loaded afterwards (default: unload if we loaded it)
@@ -24,6 +26,8 @@ NAME=
 CHECK=0
 KEEP_MODULE=0
 COW_MB=
+DETACH=0
+ARGS=("$@")
 while [ $# -gt 0 ]; do
   case $1 in
     --check) CHECK=1 ;;
@@ -31,7 +35,8 @@ while [ $# -gt 0 ]; do
     --name) NAME=$2; shift ;;
     --keep-module) KEEP_MODULE=1 ;;
     --cow-mb) COW_MB=$2; shift ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    --detach) DETACH=1 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     -*) echo "unknown option $1" >&2; exit 64 ;;
     *) NAME=$1 ;;
   esac
@@ -44,6 +49,20 @@ log() { echo "$(date -u +%T) $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
 [ "$(id -u)" = 0 ] || die "run as root"
+
+# --detach: re-run ourselves outside the login session. Some systems (Astra Linux) have
+# logind KillUserProcesses=yes, which SIGTERMs everything in the session on logout — nohup
+# does not help there; a transient system unit does.
+if [ "$DETACH" = 1 ]; then
+  command -v systemd-run >/dev/null || die "--detach needs systemd-run"
+  unit=disk2glance-$(date +%Y%m%d-%H%M%S)
+  rest=(); for a in "${ARGS[@]}"; do [ "$a" = --detach ] || rest+=("$a"); done
+  systemd-run --unit="$unit" --description="disk2glance $NAME" \
+    /bin/bash -c 'exec "$0" "$@" >>/var/log/disk2glance.log 2>&1' "$(readlink -f "$0")" ${rest[@]+"${rest[@]}"} --name "$NAME" >/dev/null \
+    || die "systemd-run failed"
+  log "started as systemd unit $unit; follow: tail -f /var/log/disk2glance.log   status: systemctl status $unit"
+  exit 0
+fi
 mkdir -p "$WORK"; chmod 700 "$WORK"
 exec 9>"$WORK/lock"; flock -n 9 || die "another disk2glance is running"
 echo $$ > "$WORK/pid"
@@ -176,15 +195,23 @@ fi
 # --- snapshots -------------------------------------------------------------------
 declare -A SNAPDEV
 MINORS=()
+UPID=
+killtree() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do killtree "$c"; done; kill -TERM "$1" 2>/dev/null || true; }
 cleanup() {
-  local m
-  for m in ${MINORS[@]+"${MINORS[@]}"}; do dbdctl destroy "$m" >/dev/null 2>&1 || log "WARN: destroy minor $m failed"; done
+  local m i
+  # stop the upload pipeline first: a dd still reading /dev/dattoN makes destroy fail with EBUSY
+  if [ -n "$UPID" ]; then killtree "$UPID"; wait "$UPID" 2>/dev/null || true; UPID=; fi
+  for m in ${MINORS[@]+"${MINORS[@]}"}; do
+    for i in 1 2 3 4 5; do dbdctl destroy "$m" >/dev/null 2>&1 && break; sleep 2; done
+    [ -e "/dev/datto$m" ] && log "WARN: destroy minor $m failed — run: dbdctl destroy $m"
+  done
   MINORS=()
   if [ "$LOADED_BY_US" = 1 ] && [ "$KEEP_MODULE" = 0 ] && [ -e /proc/datto-info ]; then
     rmmod dattobd 2>/dev/null && LOADED_BY_US=0 || log "WARN: rmmod dattobd failed"
   fi
 }
 trap cleanup EXIT
+trap 'log "signal received, cleaning up"; exit 130' INT TERM HUP
 
 next_minor() { local m=0; while [ -e "/dev/datto$m" ]; do m=$((m+1)); done; echo $m; }
 
@@ -242,10 +269,14 @@ IMG=$(curl -sS --fail -H "X-Auth-Token: $TOKEN" -H 'Content-Type: application/js
 log "image $IMG ($NAME), $DISK_BYTES bytes, snapshot $T_SNAP..$T_READY"
 
 T0=$(date +%s)
-stream | progress \
+# run the pipeline in the background and wait for it, so signal traps fire immediately
+( stream | progress \
   | tee >(md5sum | cut -d' ' -f1 >"$WORK/md5") >(sha512sum | cut -d' ' -f1 >"$WORK/sha512") \
   | curl -sS --fail -X PUT -H "X-Auth-Token: $TOKEN" -H 'Content-Type: application/octet-stream' \
-      -T - "${GLANCE%/}/v2/images/$IMG/file" || die "upload failed (image $IMG left in Glance)"
+      -T - "${GLANCE%/}/v2/images/$IMG/file" ) &
+UPID=$!
+wait "$UPID" || { UPID=; die "upload failed (image $IMG left in Glance)"; }
+UPID=
 T1=$(date +%s)
 sleep 3   # let the hash process substitutions finish
 

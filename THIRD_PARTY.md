@@ -30,7 +30,7 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 У каждого модуля рядом лежит `dattobd.ko.sha256`. `install.sh` проверяет его и сверяет
 `vermagic` модуля с `uname -r`.
 
-### Готовые модули (бандл 0.3.0)
+### Готовые модули (бандл 0.4.0)
 
 | Ядро | Дистрибутив | Где собран | Пакеты для сборки (из репозиториев дистрибутива) |
 |---|---|---|---|
@@ -40,6 +40,8 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 | `6.12.101-1.red80.x86_64` | RED OS 8 | на сборочной ВМ RED OS 8 (кросс-сборка, ядро на ВМ не установлено) | то же + `kernel-lt-devel-6.12.101-1.red80` |
 | `6.1.175-1.el7.3.x86_64` | RED OS 7.3 | на ВМ с этим ядром (exp-redos73) | `gcc`, `make`, `dkms`, `elfutils-libelf-devel`, `kernel-lt-devel-6.1.175-1.el7.3` — репозитории RED OS (`base`, `updates`, `kernels6`) |
 | `6.1.180-1.el7.3.x86_64` | RED OS 7.3 | на сборочной ВМ RED OS 7.3 (кросс-сборка) | то же + `kernel-lt-devel-6.1.180-1.el7.3` |
+| `6.1.50-1-generic` | Astra Linux SE 1.7.5 | на ВМ с этим ядром (`build-module.sh`) | `build-essential`, `libelf-dev`, `git`, `linux-headers-6.1.50-1-generic` — замороженный репозиторий Astra 1.7.5 (`download.astralinux.ru/astra/frozen/1.7_x86-64/1.7.5/repository-base`) |
+| `6.1.166-1-generic` | Astra Linux SE 1.8.6 | на ВМ с этим ядром (`build-module.sh`) | `build-essential`, `libelf-dev`, `git`, `linux-headers-6.1.166-1-generic` — замороженный репозиторий Astra 1.8.6 (`download.astralinux.ru/astra/frozen/1.8_x86-64/1.8.6/main-repository`) |
 | `3.10.0-1160.119.1.el7.x86_64` | CentOS 7.9 | на сборочной ВМ CentOS 7 (`build-module.sh`, без dkms) | `gcc`, `make`, `git`, `elfutils-libelf-devel`, `kernel-devel-3.10.0-1160.119.1.el7` — репозитории CentOS 7 (`updates`, vault.centos.org) |
 
 Модули подписаны локальными ключами DKMS сборочных ВМ, но `strip` удаляет подпись. При
@@ -56,6 +58,8 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 | `findmnt`, `flock` | util-linux | точки монтирования и ФС разделов, защита от параллельного запуска |
 | `dmsetup` (только при LVM) | device-mapper (ставится вместе с lvm2) | таблица сегментов LV: где экстенты LV лежат на диске |
 | `sync` | coreutils | сброс грязных данных перед снапшотом |
+| `systemd-run` (только с `--detach`) | systemd | запуск агента отдельным юнитом вне сессии пользователя |
+| `pgrep` | procps | остановка своего конвейера (dd, curl) при сигнале |
 | `insmod`, `rmmod`, `modinfo` | kmod | загрузка и выгрузка dattobd |
 | `pv` (необязательно) | pv | прогресс загрузки (`/run/disk2glance/progress.log`) |
 

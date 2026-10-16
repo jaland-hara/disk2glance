@@ -12,7 +12,7 @@ SRC=${SRC:-/root/dattobd}
 OUT=${OUT:-$PWD/modules}
 log() { echo "$(date -u +%T) $*" >&2; }
 
-[ -d "$SRC" ] || git clone -q --branch v$V https://github.com/datto/dattobd.git "$SRC"
+[ -d "$SRC" ] || git -c advice.detachedHead=false clone -q --branch v$V https://github.com/datto/dattobd.git "$SRC"
 
 prep_headers() { # kver: headers + System.map for genconfig
   local k=$1
