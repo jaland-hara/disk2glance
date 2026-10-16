@@ -87,4 +87,5 @@ ceph-hdd). На каждой работала нагрузка: PostgreSQL с pg
 ## Дальше
 
 Windows 10 (VSS, vTPM/BitLocker), Astra с включённой ЗПС (подпись модуля),
-CI для сборки модулей, режим репликации в тома Cinder. Подробнее в [docs/limitations.md](docs/limitations.md).
+CI для сборки модулей, хуки `--pre-snapshot`/`--post-snapshot` для согласованности
+приложений, перенос нескольких дисков за один запуск. Подробнее в [docs/limitations.md](docs/limitations.md).
