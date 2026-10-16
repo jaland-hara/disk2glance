@@ -10,9 +10,9 @@ NAME=disk2glance-$VER
 OUT=dist/$NAME
 rm -rf "$OUT" && mkdir -p "$OUT/src" dist
 
-cp VERSION install.sh disk2glance.sh "$OUT/"
+cp VERSION install.sh disk2glance.sh disk2s3.sh s3restore.sh "$OUT/"
 cp -r bin modules docs examples THIRD_PARTY.md README.md "$OUT/"
-chmod 755 "$OUT/install.sh" "$OUT/disk2glance.sh" "$OUT"/bin/*
+chmod 755 "$OUT/install.sh" "$OUT/disk2glance.sh" "$OUT/disk2s3.sh" "$OUT/s3restore.sh" "$OUT"/bin/*
 
 # dattobd source of the same tag the modules were built from
 if [ ! -f "dist/dattobd-$DATTOBD_TAG.tar.gz" ]; then

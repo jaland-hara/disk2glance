@@ -41,6 +41,7 @@ sudo disk2glance --detach --name myvm-1   # перенос в фоне, лог: 
 - [docs/service-accounts.md](docs/service-accounts.md): сервисные учётные записи VK Cloud для переноса, какие роли нужны, что указать при создании ВМ.
 - [docs/guest-drivers.md](docs/guest-drivers.md): драйверы гостевой ОС для KVM/VK Cloud, что проверяет агент, как подготовить ВМ с VMware/Hyper-V.
 - [docs/how-it-works.md](docs/how-it-works.md): что агент делает внутри гостевой ОС, что меняет в системе, нагрузка.
+- [docs/s3-mode.md](docs/s3-mode.md): **экспериментальный перенос через S3** — многопоточная загрузка частями и сборка новой ВМ из S3, замеры и лимиты S3 VK.
 - [docs/limitations.md](docs/limitations.md): ограничения, их причины и можно ли их снять.
 - [docs/build-modules.md](docs/build-modules.md): сборка модулей dattobd под новые ядра на сборочной ВМ.
 - [THIRD_PARTY.md](THIRD_PARTY.md): все сторонние компоненты, откуда взяты, как собраны, лицензии.
@@ -50,6 +51,8 @@ sudo disk2glance --detach --name myvm-1   # перенос в фоне, лог: 
 | Путь | Что это |
 |---|---|
 | `disk2glance.sh` | агент (`/opt/disk2glance/bin/disk2glance`) |
+| `disk2s3.sh` | экспериментальный агент для S3 (`/opt/disk2glance/bin/disk2s3`): multipart в несколько потоков |
+| `s3restore.sh` | сборка тома из S3 на временной ВМ-сборщике в целевом облаке |
 | `install.sh` | установщик и деинсталлятор (офлайн из архива или онлайн по URL) |
 | `make-bundle.sh` | сборка `dist/disk2glance-<ver>.tar.gz` |
 | `publish-release.sh` | публикация бандла в GitHub Releases (токен из `GITHUB_TOKEN`) |
@@ -79,6 +82,10 @@ ceph-hdd). На каждой работала нагрузка: PostgreSQL с pg
 | **CentOS 7.9, корень на LVM** (`/boot` xfs, `centos-root` xfs, `centos-swap`) | 3.10.0-1160.119.1.el7 | из бандла (собран на сборочной ВМ CentOS 7) | 480 с, 42 МиБ/с (pgbench без ограничения скорости) | ✅ LVM и XFS подняты, PostgreSQL 9.2 |
 | Astra Linux SE 1.7.5 (1.7.5.9) | 6.1.50-1-generic | собран на самой исходной ВМ | 316 с, 64 МиБ/с (одновременно с 1.8.6) | ✅ PostgreSQL 11 |
 | Astra Linux SE 1.8.6 (1.8.6.39, обновлена с 1.8.5) | 6.1.166-1-generic | собран на самой исходной ВМ | 462 с, 44 МиБ/с (одновременно с 1.7.5) | ✅ PostgreSQL 15 |
+
+**S3-режим (0.5, экспериментальный).** Ubuntu 24.04, диск 300 ГБ ceph-ssd с 250 ГБ данных:
+загрузка в S3 за 17,5 мин (291 МиБ/с, 24 потока), сборка тома из S3 за 19 мин (272 МиБ/с),
+новая ВМ загрузилась, данные совпали. Подробности в [docs/s3-mode.md](docs/s3-mode.md).
 
 «✅» означает: новая ВМ загрузилась, файловые системы восстановились по журналу, PostgreSQL
 догнал свой журнал (WAL), последняя метка в базе совпадает с моментом снапшота, проверка

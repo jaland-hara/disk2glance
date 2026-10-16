@@ -320,10 +320,37 @@ cleanup() {
     [ -e "/dev/datto$m" ] && log "WARN: destroy minor $m failed — run: dbdctl destroy $m"
   done
   MINORS=()
+  fb_remove
   if [ "$LOADED_BY_US" = 1 ] && [ "$KEEP_MODULE" = 0 ] && [ -e /proc/datto-info ]; then
     rmmod dattobd 2>/dev/null && LOADED_BY_US=0 || log "WARN: rmmod dattobd failed"
   fi
 }
+# --- COW files on the new VM ---------------------------------------------------------------
+# dattobd creates its COW file on the snapshotted filesystem just before the snapshot, so the
+# file (10% of the filesystem by default) is part of the copy. A one-shot unit written before
+# the snapshot and removed from the source right after it deletes these files on the first
+# boot of the new VM, then deletes itself. The source keeps no trace of it.
+FB_UNIT=/etc/systemd/system/disk2glance-cowclean.service
+FB_LINK=/etc/systemd/system/multi-user.target.wants/disk2glance-cowclean.service
+fb_install() {
+  local files= t tdev tmnt
+  [ ${#TARGETS[@]} -gt 0 ] || return 0
+  if [ ! -d /etc/systemd/system ]; then log "WARN: no systemd: delete the $COW files on the new VM by hand"; return 0; fi
+  for t in "${TARGETS[@]}"; do read -r tdev tmnt <<<"$t"; files="$files ${tmnt%/}/$COW"; done
+  cat >"$FB_UNIT" <<UNIT
+[Unit]
+Description=disk2glance: delete dattobd COW files copied with the disk
+After=local-fs.target
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for f in$files; do [ -e "\$\$f" ] && { chattr -i "\$\$f" 2>/dev/null; rm -f "\$\$f"; }; done; rm -f $FB_LINK $FB_UNIT'
+[Install]
+WantedBy=multi-user.target
+UNIT
+  mkdir -p "${FB_LINK%/*}"; ln -sf "$FB_UNIT" "$FB_LINK"
+}
+fb_remove() { rm -f "$FB_LINK" "$FB_UNIT"; }
+
 trap cleanup EXIT
 trap 'log "signal received, cleaning up"; exit 130' INT TERM HUP
 
@@ -332,6 +359,7 @@ next_minor() { local m=0; while [ -e "/dev/datto$m" ]; do m=$((m+1)); done; echo
 # Flush dirty data first: dattobd freezes the filesystem while it sets up the snapshot,
 # and on a busy disk the freeze-time flush is what stalls application writes (measured:
 # 17-26 s without, ~11 s with sync, ~6 s with sync + 256 MiB COW on a loaded ceph-hdd).
+fb_install
 t0=$(date +%s); sync; log "sync before snapshots: $(( $(date +%s) - t0 )) s"
 COWOPT=(); [ -n "$COW_MB" ] && COWOPT=(-f "$COW_MB")
 T_SNAP=$(date -u +%FT%T.%3NZ)
@@ -343,6 +371,7 @@ for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
   MINORS+=("$m"); SNAPDEV[$tdev]=/dev/datto$m
   log "snapshot $tdev ($tmnt) -> /dev/datto$m in $(( ($(date +%s%N) - t0) / 1000000 )) ms"
 done
+fb_remove   # the copy has the unit, the source no longer does
 T_READY=$(date -u +%FT%T.%3NZ)
 
 # --- raw disk stream -------------------------------------------------------------
