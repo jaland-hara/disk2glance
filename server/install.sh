@@ -9,6 +9,8 @@ install -d -m 755 /opt/d2g /etc/d2g
 install -m 755 d2g.py /opt/d2g/d2g.py
 ln -sf /opt/d2g/d2g.py /usr/local/sbin/d2g
 install -m 644 d2g.service /etc/systemd/system/d2g.service
+# job volumes are copies of source disks: the receiver's own disk must not look like them at boot
+./unique-boot.sh
 [ -f /etc/d2g/d2g.json ] || /opt/d2g/d2g.py init "$@"
 [ -f /etc/d2g/openrc ] || { install -m 600 /dev/null /etc/d2g/openrc; echo "fill /etc/d2g/openrc (OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_PROJECT_ID, OS_USER_DOMAIN_NAME, OS_REGION_NAME)"; }
 systemctl daemon-reload

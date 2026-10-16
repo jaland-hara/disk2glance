@@ -26,8 +26,11 @@ import base64
 import hashlib
 import http.server
 import json
+import mmap
+import multiprocessing
 import os
 import secrets
+import signal
 import socketserver
 import sqlite3
 import ssl
@@ -49,6 +52,7 @@ OPENRC = os.path.join(ETC, "openrc")
 CHUNK = 4 << 20
 TOKEN_TTL = 3600
 DEFAULT_PART = 64 << 20
+BLOCKS_PER_PART = 16   # a part is hashed in 16 blocks: a delta sends only the blocks that changed
 
 
 def log(*a):
@@ -221,6 +225,15 @@ def metadata():
         return json.load(r)
 
 
+_ZMD5 = {}
+
+
+def zero_md5(n):
+    if n not in _ZMD5:
+        _ZMD5[n] = hashlib.md5(bytes(n)).hexdigest()
+    return _ZMD5[n]
+
+
 def dev_of(serial):
     return f"/dev/disk/by-id/virtio-{serial}"
 
@@ -243,8 +256,9 @@ def check_target(path):
 
 # --- HTTPS API -------------------------------------------------------------------------------
 class Limits:
+    """total: shared by all worker processes; per job: per process."""
     def __init__(self, total, per_job):
-        self.total = threading.BoundedSemaphore(total)
+        self.total = total
         self.per_job_n = per_job
         self.per_job = {}
         self.lock = threading.Lock()
@@ -326,7 +340,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                  "ORDER BY created DESC LIMIT 1", (name,)).fetchone()
                 if not j:
                     return self.reply(404, {"error": "no job for this agent"})
-                return self.reply(200, {k: j[k] for k in ("id", "disk_bytes", "part_bytes", "state", "fresh", "pass_no")})
+                r = {k: j[k] for k in ("id", "disk_bytes", "part_bytes", "state", "fresh", "pass_no")}
+                r["block_bytes"] = j["part_bytes"] // BLOCKS_PER_PART
+                return self.reply(200, r)
             if len(p) >= 3 and p[:2] == ["v1", "jobs"]:
                 j = self.job_of(name, p[2])
                 if not j:
@@ -338,7 +354,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 tail = p[3:]
                 if tail == ["parts"] and method == "GET":
                     rows = db().execute("SELECT n, md5 FROM parts WHERE job=?", (j["id"],)).fetchall()
-                    return self.reply(200, {"part_bytes": j["part_bytes"], "parts": {str(r["n"]): r["md5"] for r in rows}})
+                    return self.reply(200, {"part_bytes": j["part_bytes"], "block_bytes": j["part_bytes"] // BLOCKS_PER_PART,
+                                            "parts": {str(r["n"]): r["md5"] for r in rows}})
                 if len(tail) == 2 and tail[0] == "parts" and method == "PUT":
                     return self.put_part(j, int(tail[1]))
                 if tail == ["start"] and method == "POST":
@@ -387,65 +404,90 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.reply(200, {"cert": crt})
 
     def put_part(self, j, n):
+        """Write blocks of part n. Journal value of a part: its block MD5s "md5,md5,...".
+
+        X-D2G-Blocks: "i:md5,..." — the body is these blocks one after another;
+        X-D2G-Zero-Blocks: "i,..." — blocks of zeros, no data. A part the journal does not
+        know must come whole (all blocks), a known part may come as changed blocks only."""
         lim = self.server.limits
         part, disk = j["part_bytes"], j["disk_bytes"]
+        block = part // BLOCKS_PER_PART
         nparts = (disk + part - 1) // part
         if not 1 <= n <= nparts:
             self.drain()
             return self.reply(400, {"error": f"part {n} out of 1..{nparts}"})
         off = (n - 1) * part
         length = min(part, disk - off)
-        zero = self.headers.get("X-D2G-Zero") == "1"
+        nblocks = (length + block - 1) // block
+        blen = lambda i: min(block, length - i * block)  # noqa: E731
+        try:
+            data = [(int(x.split(":")[0]), x.split(":")[1]) for x in self.headers.get("X-D2G-Blocks", "").split(",") if x]
+            zero = [int(x) for x in self.headers.get("X-D2G-Zero-Blocks", "").split(",") if x]
+        except (ValueError, IndexError):
+            self.drain()
+            return self.reply(400, {"error": "bad X-D2G-Blocks / X-D2G-Zero-Blocks"})
+        idx = [i for i, _ in data] + zero
         clen = int(self.headers.get("Content-Length") or 0)
-        want = self.headers.get("Content-MD5", "")
-        if (zero and clen) or (not zero and clen != length) or (not zero and not want):
+        if not idx or len(set(idx)) != len(idx) or not all(0 <= i < nblocks for i in idx) \
+                or clen != sum(blen(i) for i, _ in data):
             self.drain()
-            return self.reply(400, {"error": f"part {n}: need Content-Length {length} and Content-MD5, or X-D2G-Zero"})
+            return self.reply(400, {"error": f"part {n}: bad block list or Content-Length"})
+        row = db().execute("SELECT md5 FROM parts WHERE job=? AND n=?", (j["id"], n)).fetchone()
+        known = row["md5"].split(",") if row and row["md5"].count(",") == nblocks - 1 else None
+        if known is None and len(idx) != nblocks:
+            self.drain()
+            return self.reply(409, {"error": f"part {n} is unknown here: send all its blocks"})
         jsem = lim.job(j["id"])
-        if not lim.total.acquire(blocking=False):
+        if not lim.total.acquire(False):
             self.drain()
-            return self.reply(503, {"error": "busy"}, {"Retry-After": "5"})
-        if not jsem.acquire(blocking=False):
+            return self.reply(503, {"error": "busy"}, {"Retry-After": "1"})
+        if not jsem.acquire(False):
             lim.total.release()
             self.drain()
-            return self.reply(503, {"error": "job busy"}, {"Retry-After": "5"})
+            return self.reply(503, {"error": "job busy"}, {"Retry-After": "1"})
         try:
             dev = check_target(dev_of(j["serial"]))
-            fd = os.open(dev, os.O_WRONLY)
+            new = list(known) if known else [""] * nblocks
+            # O_DIRECT: dozens of parallel parts through the page cache end in writeback storms
+            # (650 MB/s for 20 s, then 40-60 MB/s with iowait 99% on VK). The buffer is an
+            # anonymous mmap (page-aligned); offsets and lengths are multiples of 512.
+            fd = os.open(dev, os.O_WRONLY | os.O_DIRECT)
+            buf = mmap.mmap(-1, CHUNK)
+            mv = memoryview(buf)
             try:
-                if zero:
-                    zmd5 = hashlib.md5(bytes(length)).hexdigest()
-                    known = db().execute("SELECT md5 FROM parts WHERE job=? AND n=?", (j["id"], n)).fetchone()
-                    # a new volume reads as zeros: a zero part that was never written needs no write
-                    if j["fresh"] and not known:
-                        pass
-                    else:
-                        z, done = bytes(CHUNK), 0
-                        while done < length:
-                            done += os.pwrite(fd, z[:min(CHUNK, length - done)], off + done)
-                        os.fdatasync(fd)
-                    got = zmd5
-                else:
-                    m, done = hashlib.md5(), 0
-                    while done < length:
-                        b = self.rfile.read(min(CHUNK, length - done))
-                        if not b:
+                for i, want in data:
+                    m, done, bl, bo = hashlib.md5(), 0, blen(i), off + i * block
+                    while done < bl:
+                        cnt = min(CHUNK, bl - done)
+                        if self.rfile.readinto(mv[:cnt]) != cnt:
                             raise ConnectionResetError("short body")
-                        m.update(b)
+                        m.update(mv[:cnt])
                         w = 0
-                        while w < len(b):
-                            w += os.pwrite(fd, b[w:], off + done + w)
-                        done += len(b)
-                    os.fdatasync(fd)
-                    if base64.b64encode(m.digest()).decode() != want:
-                        # the bytes on the volume are wrong now: forget the part so it is sent again
+                        while w < cnt:
+                            w += os.pwrite(fd, mv[w:cnt], bo + done + w)
+                        done += cnt
+                    if m.hexdigest() != want:
+                        # the bytes on the volume are wrong now: forget the part, it is sent again whole
                         db().execute("DELETE FROM parts WHERE job=? AND n=?", (j["id"], n))
-                        return self.reply(400, {"error": f"part {n}: MD5 mismatch"})
-                    got = m.hexdigest()
+                        self.close_connection = True   # the rest of the body is not read
+                        return self.reply(400, {"error": f"part {n} block {i}: MD5 mismatch"})
+                    new[i] = want
+                for i in zero:
+                    # a new volume reads as zeros: zeros of a part never written need no write
+                    if not (j["fresh"] and known is None):
+                        buf.seek(0)
+                        buf.write(bytes(CHUNK))
+                        done, bl, bo = 0, blen(i), off + i * block
+                        while done < bl:
+                            done += os.pwrite(fd, mv[:min(CHUNK, bl - done)], bo + done)
+                    new[i] = zero_md5(blen(i))
+                os.fdatasync(fd)
             finally:
+                mv.release()
+                buf.close()
                 os.close(fd)
-            db().execute("INSERT OR REPLACE INTO parts VALUES (?,?,?,?)", (j["id"], n, got, now()))
-            return self.reply(200, {"n": n, "md5": got})
+            db().execute("INSERT OR REPLACE INTO parts VALUES (?,?,?,?)", (j["id"], n, ",".join(new), now()))
+            return self.reply(200, {"n": n, "blocks": len(data), "zero": len(zero)})
         finally:
             jsem.release()
             lim.total.release()
@@ -455,7 +497,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         nparts = (j["disk_bytes"] + j["part_bytes"] - 1) // j["part_bytes"]
         if len(md5s) != nparts:
             return self.reply(400, {"error": f"{len(md5s)} MD5s, job has {nparts} parts"})
-        have = {r["n"]: r["md5"] for r in db().execute("SELECT n, md5 FROM parts WHERE job=?", (j["id"],))}
+        # per part the agent sends MD5 of its block list, the receiver computes it from the journal
+        have = {r["n"]: hashlib.md5(r["md5"].encode()).hexdigest()
+                for r in db().execute("SELECT n, md5 FROM parts WHERE job=?", (j["id"],))}
         bad = [i + 1 for i, h in enumerate(md5s) if have.get(i + 1) != h]
         if bad:
             return self.reply(409, {"error": "parts missing or different", "parts": bad[:1000], "count": len(bad)})
@@ -488,9 +532,26 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
                 pass
 
 
+def root_serial():
+    src = subprocess.run(["findmnt", "-no", "SOURCE", "/"], capture_output=True, text=True).stdout.strip()
+    disk = subprocess.run(["lsblk", "-no", "PKNAME", src], capture_output=True, text=True).stdout.split()
+    try:
+        with open(f"/sys/block/{disk[0]}/serial") as f:
+            return src, f.read().strip()
+    except (IndexError, OSError):
+        return src, ""
+
+
 def cmd_serve(a):
     c = conf()
     db().executescript(SCHEMA)
+    # a job volume is a copy of a source disk: if the receiver booted from one (same image ->
+    # same filesystem UUIDs and labels), writing to the "other" volumes would destroy data
+    src, serial = root_serial()
+    hit = db().execute("SELECT id FROM jobs WHERE serial=? AND state NOT IN ('deleted')", (serial,)).fetchone() if serial else None
+    if hit:
+        die(f"the root filesystem {src} is on the volume of job {hit['id']}: this VM booted a copy of a source. "
+            f"Stop it, detach the job volumes, start it again and run unique-boot.sh")
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(f"{PKI}/server.crt", f"{PKI}/server.key")
@@ -498,8 +559,35 @@ def cmd_serve(a):
     ctx.verify_mode = ssl.CERT_OPTIONAL   # enrollment and the CA download come without a client cert
     srv = Server(("0.0.0.0", c["port"]), Handler)
     srv.ctx = ctx
-    srv.limits = Limits(c["max_inflight"], c["max_per_job"])
-    log(f"d2g serving {c['name']} on :{c['port']} (inflight {c['max_inflight']}, per job {c['max_per_job']})")
+    # one worker process per core (TLS, MD5 and the copy loop hold the GIL in one process); they
+    # share the listening socket and the global limit, the per-job limit is split between them
+    workers = a.workers or os.cpu_count() or 1
+    total = multiprocessing.BoundedSemaphore(c["max_inflight"])
+    # the per-job limit is per process: a process does not know how many parts of the job the
+    # others are writing, so splitting it would turn uneven connection spread into 503s
+    per_job = c["max_per_job"]
+    _tls.__dict__.pop("db", None)   # no SQLite connection may cross fork()
+    log(f"d2g serving {c['name']} on :{c['port']} ({workers} workers, inflight {c['max_inflight']}, "
+        f"per job {per_job} per worker)")
+    kids = []
+    for _ in range(workers - 1):
+        pid = os.fork()
+        if pid == 0:
+            srv.limits = Limits(total, per_job)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            srv.serve_forever()
+            os._exit(0)
+        kids.append(pid)
+
+    def stop(*_):
+        for p in kids:
+            try:
+                os.kill(p, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        os._exit(0)
+    signal.signal(signal.SIGTERM, stop)
+    srv.limits = Limits(total, per_job)
     srv.serve_forever()
 
 
@@ -664,7 +752,9 @@ def main():
     p.add_argument("--max-inflight", type=int, default=4 * (os.cpu_count() or 1))
     p.add_argument("--max-per-job", type=int, default=16)
     p.set_defaults(fn=cmd_init)
-    sp.add_parser("serve").set_defaults(fn=cmd_serve)
+    p = sp.add_parser("serve")
+    p.add_argument("--workers", type=int, help="worker processes (default: one per core)")
+    p.set_defaults(fn=cmd_serve)
     p = sp.add_parser("agent")
     p.add_argument("op", choices=["add", "list", "revoke"])
     p.add_argument("name", nargs="?")

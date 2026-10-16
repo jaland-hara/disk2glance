@@ -121,7 +121,7 @@ export -f rxreq
 code=$(rxretry 200 GET /v1/agent/job "$WORK/job.json")
 [ "$code" = 200 ] || die "no job from the receiver: HTTP $code $(head -c 300 "$WORK/job.json" 2>/dev/null)"
 JOB=$(jq -r .id "$WORK/job.json"); JOB_BYTES=$(jq -r .disk_bytes "$WORK/job.json")
-PART_BYTES=$(jq -r .part_bytes "$WORK/job.json"); PASS=$(( $(jq -r .pass_no "$WORK/job.json") + 1 ))
+PART_BYTES=$(jq -r .part_bytes "$WORK/job.json"); BLOCK_BYTES=$(jq -r .block_bytes "$WORK/job.json"); PASS=$(( $(jq -r .pass_no "$WORK/job.json") + 1 ))
 log "job $JOB: pass $PASS, part $((PART_BYTES / 1048576)) MiB, state $(jq -r .state "$WORK/job.json")"
 
 # --- layout from sysfs (same as disk2glance) -----------------------------------------
@@ -290,8 +290,34 @@ SEG=$WORK/segments
     echo "$doff $len $src $soff"; pos=$((doff + len))
   done < <(for m in ${MAPS[@]+"${MAPS[@]}"}; do read -r tdev toff tlen doff <<<"$m"; echo "$doff $tlen ${SNAPDEV[$tdev]} $toff"; done | sort -n)
   [ "$pos" -lt "$DISK_BYTES" ] && echo "$pos $((DISK_BYTES - pos)) $DISK $pos"
-} >"$SEG"
-log "segments: $(wc -l <"$SEG")"
+} >"$SEG.raw"
+# The COW files are part of the copy (deleted there at first boot), but their content is of no use:
+# their extents go as zeros, so they cost nothing on the wire and do not show up in every delta.
+# filefrag gives physical extents in filesystem blocks; MAPS maps the filesystem onto the disk.
+for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
+  read -r tdev tmnt <<<"$t"
+  f="${tmnt%/}/$COW"; [ -f "$f" ] || continue
+  bs=$(filefrag -v "$f" 2>/dev/null | sed -n 's/.*blocks of \([0-9]*\) bytes.*/\1/p'); [ -n "$bs" ] || continue
+  filefrag -v "$f" | awk '/^ *[0-9]+: *[0-9]+\.\./ { gsub(/\.\./, " "); gsub(/:/, " "); print $4, $5 }' |
+  while read -r pa pb; do
+    fo=$((pa * bs)); fl=$(( (pb - pa + 1) * bs ))
+    for m in ${MAPS[@]+"${MAPS[@]}"}; do
+      read -r mdev moff mlen mdoff <<<"$m"; [ "$mdev" = "$tdev" ] || continue
+      a=$(( fo > moff ? fo : moff )); b=$(( fo + fl < moff + mlen ? fo + fl : moff + mlen ))
+      [ "$a" -lt "$b" ] && echo "$((mdoff + a - moff)) $((b - a))"
+    done
+  done
+done | sort -n >"$WORK/zero_ranges"
+# cut the zero ranges out of the segments: "disk_off len zero 0"
+awk 'NR == FNR { zs[++nz] = $1; ze[nz] = $1 + $2; next }
+     { o = $1; e = $1 + $2
+       for (i = 1; i <= nz && o < e; i++) {
+         if (ze[i] <= o || zs[i] >= e) continue
+         if (zs[i] > o) { printf "%.0f %.0f %s %.0f\n", o, zs[i] - o, $3, $4 + o - $1; o = zs[i] }
+         z = (ze[i] < e ? ze[i] : e); printf "%.0f %.0f zero 0\n", o, z - o; o = z
+       }
+       if (o < e) printf "%.0f %.0f %s %.0f\n", o, e - o, $3, $4 + o - $1 }' "$WORK/zero_ranges" "$SEG.raw" >"$SEG"
+log "segments: $(wc -l <"$SEG"), COW files sent as zeros: $(awk '{s += $2} END {printf "%.0f", s / 1048576}' "$WORK/zero_ranges") MiB"
 
 # --- transfer ----------------------------------------------------------------------------------
 code=$(rxretry 200 POST "/v1/jobs/$JOB/start" "$WORK/start.resp" -H 'Content-Type: application/json' \
@@ -304,10 +330,8 @@ jq -r '.parts | to_entries[] | "\(.key) \(.value)"' "$WORK/journal.json" | while
 HAVE=$(ls "$WORK/parts" | grep -c '\.have$' || true)
 log "receiver already has $HAVE/$NPARTS parts"
 BUF=/dev/shm/disk2rx; rm -rf "$BUF"; mkdir -p "$BUF"; chmod 700 "$BUF"; ln -sfn "$BUF" "$WORK/buf"
-ZMD5_FULL=$(head -c "$PART_BYTES" /dev/zero | md5sum | cut -d' ' -f1)
-LAST_LEN=$(( DISK_BYTES - (NPARTS - 1) * PART_BYTES ))
-ZMD5_LAST=$(head -c "$LAST_LEN" /dev/zero | md5sum | cut -d' ' -f1)
-export WORK BUF SEG JOB PART_BYTES DISK_BYTES NPARTS ZMD5_FULL ZMD5_LAST
+ZMD5_BLOCK=$(head -c "$BLOCK_BYTES" /dev/zero | md5sum | cut -d' ' -f1)
+export WORK BUF SEG JOB PART_BYTES BLOCK_BYTES DISK_BYTES NPARTS ZMD5_BLOCK
 
 # read [off, off+len) of the composed disk to stdout
 emit_range() {
@@ -316,44 +340,63 @@ emit_range() {
     [ $((doff + slen)) -le "$off" ] && continue
     [ "$doff" -ge "$end" ] && break
     a=$(( off > doff ? off : doff )); b=$(( end < doff + slen ? end : doff + slen ))
-    dd if="$src" bs=4M iflag=skip_bytes,count_bytes,fullblock skip=$((soff + a - doff)) count=$((b - a)) status=none
+    if [ "$src" = zero ]; then head -c $((b - a)) /dev/zero
+    else dd if="$src" bs=4M iflag=skip_bytes,count_bytes,fullblock skip=$((soff + a - doff)) count=$((b - a)) status=none; fi
   done <"$SEG"
 }
-# do_part K: read the part, skip it if the receiver has the same MD5, else send it (zeros as a marker)
+# do_part K: read the part and hash its blocks (a part = 16 blocks). Blocks the receiver already
+# has with the same MD5 are skipped; zero blocks go as a marker without data; the rest go in one
+# request: body = the changed blocks one after another, X-D2G-Blocks = "index:md5,..." in body order.
 do_part() {
-  local k=$1 off len buf md5b md5h zmd5 code try args
+  local k=$1 off len buf cur have i h n code try body nb blen zmd5
   off=$(( (k - 1) * PART_BYTES )); len=$(( DISK_BYTES - off < PART_BYTES ? DISK_BYTES - off : PART_BYTES ))
   buf=$BUF/p$k
   emit_range "$off" "$len" >"$buf" || { echo "part $k: read failed" >&2; return 1; }
   [ "$(stat -c %s "$buf")" = "$len" ] || { echo "part $k: short read" >&2; return 1; }
-  md5b=$(openssl dgst -md5 -binary "$buf" | base64)
-  md5h=$(printf '%s' "$md5b" | base64 -d | od -An -tx1 | tr -d ' \n')
-  if [ -f "$WORK/parts/$k.have" ] && [ "$(cat "$WORK/parts/$k.have")" = "$md5h" ]; then
-    echo "$md5h" >"$WORK/parts/$k.ok"; rm -f "$buf"; return 0
+  mapfile -t cur < <(split -b "$BLOCK_BYTES" --filter='md5sum' "$buf" | cut -c1-32)
+  have=(); [ -f "$WORK/parts/$k.have" ] && IFS=, read -r -a have <"$WORK/parts/$k.have"
+  local data=() zero=() hdr=
+  n=${#cur[@]}
+  for ((i = 0; i < n; i++)); do
+    [ ${#have[@]} = "$n" ] && [ "${have[i]}" = "${cur[i]}" ] && continue
+    blen=$(( len - i * BLOCK_BYTES < BLOCK_BYTES ? len - i * BLOCK_BYTES : BLOCK_BYTES ))
+    zmd5=$ZMD5_BLOCK; [ "$blen" != "$BLOCK_BYTES" ] && zmd5=$(head -c "$blen" /dev/zero | md5sum | cut -c1-32)
+    if [ "${cur[i]}" = "$zmd5" ]; then zero+=("$i"); else data+=("$i:${cur[i]}"); fi
+  done
+  if [ ${#data[@]} = 0 ] && [ ${#zero[@]} = 0 ]; then
+    (IFS=,; echo "${cur[*]}") >"$WORK/parts/$k.ok"; rm -f "$buf"; return 0
   fi
-  zmd5=$ZMD5_FULL; [ "$len" != "$PART_BYTES" ] && zmd5=$ZMD5_LAST
-  local mark=sent
-  if [ "$md5h" = "$zmd5" ]; then mark=zero; args=(-H "X-D2G-Zero: 1" -H "Content-Length: 0" --data-binary "")
-  else args=(-H "Content-MD5: $md5b" -H "Content-Type: application/octet-stream" --speed-limit 65536 --speed-time 60 -T "$buf"); fi
+  body=$buf
+  if [ ${#data[@]} -lt "$n" ] && [ ${#data[@]} -gt 0 ]; then
+    body=$buf.d; : >"$body"
+    for h in "${data[@]}"; do dd if="$buf" of="$body" bs="$BLOCK_BYTES" skip="${h%%:*}" count=1 oflag=append conv=notrunc status=none; done
+  elif [ ${#data[@]} = 0 ]; then body=/dev/null; fi
+  nb=$(stat -c %s "$body" 2>/dev/null || echo 0); [ "$body" = /dev/null ] && nb=0
+  local args=(-H "Content-Type: application/octet-stream" --speed-limit 65536 --speed-time 60)
+  [ ${#data[@]} -gt 0 ] && args+=(-H "X-D2G-Blocks: $(IFS=,; echo "${data[*]}")" -T "$body")
+  [ ${#zero[@]} -gt 0 ] && args+=(-H "X-D2G-Zero-Blocks: $(IFS=,; echo "${zero[*]}")")
+  [ ${#data[@]} = 0 ] && args+=(-H "Content-Length: 0" --data-binary "")
   for try in $(seq 1 12); do
     code=$(rxreq PUT "/v1/jobs/$JOB/parts/$k" "$WORK/parts/$k.resp" "${args[@]}")
     if [ "$code" = 200 ]; then
-      echo "$md5h" >"$WORK/parts/$k.ok"; touch "$WORK/parts/$k.$mark"; rm -f "$buf" "$WORK/parts/$k.resp"; return 0
+      (IFS=,; echo "${cur[*]}") >"$WORK/parts/$k.ok"; echo "$nb ${#data[@]} ${#zero[@]}" >"$WORK/parts/$k.sent"
+      rm -f "$buf" "$buf.d" "$WORK/parts/$k.resp"; return 0
     fi
-    if [ "$code" = 503 ]; then sleep 5; continue; fi   # receiver busy: not an error
+    if [ "$code" = 503 ]; then echo x >>"$WORK/parts/busy"; sleep 1; continue; fi   # receiver busy: not an error
     echo "$(date -u +%T) part $k try $try: HTTP $code $(head -c 200 "$WORK/parts/$k.resp" 2>/dev/null)" >&2
     echo "$try" >>"$WORK/parts/retries"
-    case $code in 401|403|404|409) break ;; esac
+    case $code in 401|403|404) break ;; 409) rm -f "$WORK/parts/$k.have"; break ;; esac
     sleep $(( try * 5 < 60 ? try * 5 : 60 ))
   done
-  rm -f "$buf"; return 1
+  rm -f "$buf" "$buf.d"; return 1
 }
 export -f emit_range do_part
 
 T0=$(date +%s)
 ( exec 9>&-; while sleep 30; do   # fd 9 = lock: a leftover sleep must not hold it
-    n=$(ls "$WORK/parts" | grep -c '\.ok$' || true); s=$(ls "$WORK/parts" | grep -c '\.sent$' || true); dt=$(( $(date +%s) - T0 ))
-    log "progress: $n/$NPARTS parts checked, $s sent, $(( s * PART_BYTES / 1048576 / (dt > 0 ? dt : 1) )) MiB/s sent, retries $(cat "$WORK/parts/retries" 2>/dev/null | wc -l)"
+    n=$(ls "$WORK/parts" | grep -c '\.ok$' || true); dt=$(( $(date +%s) - T0 ))
+    b=$(cat "$WORK"/parts/*.sent 2>/dev/null | awk '{s += $1} END {printf "%.0f", s / 1048576}')
+    log "progress: $n/$NPARTS parts checked, $b MiB sent, $(( b / (dt > 0 ? dt : 1) )) MiB/s, retries $(cat "$WORK/parts/retries" 2>/dev/null | wc -l)"
   done ) & PPID_MON=$!
 for round in 1 2 3; do
   seq 1 "$NPARTS" | while read -r k; do [ -f "$WORK/parts/$k.ok" ] || echo "$k"; done >"$WORK/todo"
@@ -362,8 +405,9 @@ for round in 1 2 3; do
   wait "$XPID" || log "round $round: some parts failed, $(seq 1 "$NPARTS" | while read -r k; do [ -f "$WORK/parts/$k.ok" ] || echo x; done | wc -l) left"
   XPID=
   # the receiver confirms the whole disk; parts it lacks (or has with another MD5) are sent again
+  # per part: MD5 of its block list "md5,md5,..." (the receiver computes the same from its journal)
   { printf '{"snapshot_time":"%s","sent":%s,"part_md5":[' "$T_SNAP" "$(ls "$WORK/parts" | grep -c '\.sent$' || true)"
-    for k in $(seq 1 "$NPARTS"); do [ "$k" -gt 1 ] && printf ','; printf '"%s"' "$(cat "$WORK/parts/$k.ok" 2>/dev/null)"; done
+    for k in $(seq 1 "$NPARTS"); do [ "$k" -gt 1 ] && printf ','; printf '"%s"' "$(tr -d '\n' <"$WORK/parts/$k.ok" 2>/dev/null | md5sum | cut -c1-32)"; done
     printf ']}\n'; } >"$WORK/complete.json"
   missing=$(seq 1 "$NPARTS" | while read -r k; do [ -f "$WORK/parts/$k.ok" ] || echo x; done | wc -l)
   [ "$missing" -gt 0 ] && continue
@@ -376,6 +420,6 @@ done
 T1=$(date +%s); kill "$PPID_MON" 2>/dev/null || true; PPID_MON=
 [ "${DONE:-0}" = 1 ] || die "transfer incomplete after 3 rounds"
 dt=$((T1 - T0)); [ $dt -gt 0 ] || dt=1
-SENT=$(ls "$WORK/parts" | grep -c '\.sent$' || true); ZERO=$(ls "$WORK/parts" | grep -c '\.zero$' || true)
-log "pass $PASS done in $dt s: $SENT of $NPARTS parts sent, $ZERO zero, $((NPARTS - SENT - ZERO)) unchanged ($(( SENT * PART_BYTES / 1048576 )) MiB, $(( SENT * PART_BYTES / 1048576 / dt )) MiB/s), disk read $(( DISK_BYTES / 1048576 / dt )) MiB/s, retries $(cat "$WORK/parts/retries" 2>/dev/null | wc -l)"
+read -r SENTB DBLK ZBLK SENT < <(cat "$WORK"/parts/*.sent 2>/dev/null | awk '{b += $1; d += $2; z += $3; n++} END {printf "%.0f %d %d %d\n", b, d, z, n}')
+log "pass $PASS done in $dt s: $SENT of $NPARTS parts changed, blocks: $DBLK sent, $ZBLK zero; $(( SENTB / 1048576 )) MiB on the wire ($(( SENTB / 1048576 / dt )) MiB/s), disk read $(( DISK_BYTES / 1048576 / dt )) MiB/s, retries $(cat "$WORK/parts/retries" 2>/dev/null | wc -l), busy $(cat "$WORK/parts/busy" 2>/dev/null | wc -l)"
 log "OK: receiver confirmed all $NPARTS parts, snapshot $T_SNAP"
