@@ -145,8 +145,9 @@ WAL, последняя запись в таблице совпадает с м�
 
 | Что | Где | Когда |
 |---|---|---|
-| файлы агента | `/opt/disk2glance/`, ссылки `/usr/local/sbin/disk2glance` и `/usr/sbin/disk2glance` | при установке |
-| конфигурация | `/etc/disk2glance/openrc` (600), `/etc/disk2glance/props.json` | при установке или вручную |
+| файлы агента | `/opt/disk2glance/`, ссылки `/usr/local/sbin/disk2glance` и `/usr/sbin/disk2glance` |
+| правило SELinux (если SELinux включён) | `semanage fcontext`: `/opt/disk2glance/modules(/.*)?` → `modules_object_t` | при установке; удаляется при `--uninstall` | при установке |
+| конфигурация | `/etc/disk2glance/openrc` (600), `props.json`, `disk2glance.conf` | при установке (из шаблонов, если файлов нет) или вручную |
 | модуль ядра `dattobd` | в памяти ядра | только пока работает агент |
 | COW-файлы `.datto_d2g` | в корне каждой снапшотируемой ФС (раздела или LV) | только пока работает агент |
 | служебные файлы | `/run/disk2glance/` (lock, pid, md5, progress) | во время работы |

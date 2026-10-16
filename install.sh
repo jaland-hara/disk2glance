@@ -40,7 +40,9 @@ if [ "$UNINSTALL" = 1 ]; then
     if grep -q '"minor"' /proc/datto-info; then die "dattobd has active snapshots — run 'dbdctl destroy <minor>' first"; fi
     rmmod dattobd && log "dattobd unloaded"
   fi
-  rm -rf "$PREFIX" /usr/local/sbin/disk2glance /run/disk2glance
+  # (no 'semanage -l | grep -q' test: with pipefail grep's early exit makes it false)
+  command -v semanage >/dev/null && semanage fcontext -d "$PREFIX/modules(/.*)?" 2>/dev/null || true
+  rm -rf "$PREFIX" /usr/local/sbin/disk2glance /run/disk2glance /var/log/disk2glance.log
   [ "$(readlink /usr/sbin/disk2glance 2>/dev/null)" = "$PREFIX/bin/disk2glance" ] && rm -f /usr/sbin/disk2glance
   rm -f /.datto_d2g
   [ "$PURGE" = 1 ] && rm -rf "$CONF" && log "config removed"
@@ -69,13 +71,16 @@ log "installing disk2glance $VER for kernel $KVER"
 
 # --- environment checks ------------------------------------------------------------
 [ "$(uname -m)" = x86_64 ] || die "only x86_64 is supported"
-for c in curl dd findmnt flock md5sum sha512sum tee insmod rmmod; do
+for c in curl dd findmnt flock md5sum sha512sum tee insmod rmmod stat; do
   command -v $c >/dev/null || die "required command '$c' not found"
 done
-if command -v mokutil >/dev/null && mokutil --sb-state 2>/dev/null | grep -qi enabled; then
+sb=$(mokutil --sb-state 2>/dev/null || true)
+if [[ "${sb,,}" == *"secureboot enabled"* ]]; then
   warn "Secure Boot is enabled: an unsigned dattobd module will not load (sign it with a MOK key or disable SB)"
 fi
-if command -v astra-digsig-control >/dev/null && astra-digsig-control is-enabled 2>/dev/null | grep -qiE 'enabled|^1'; then
+# answers in the system language: ENABLED/DISABLED or ВКЛЮЧЕНО/ВЫКЛЮЧЕНО
+zps=$(astra-digsig-control is-enabled 2>/dev/null || true)
+if [ "$zps" = 1 ] || [[ "${zps^^}" == ENABLED* ]] || [ "$zps" = ВКЛЮЧЕНО ]; then
   warn "Astra Linux closed software environment (ZPS/digsig) is on: unsigned modules and binaries will be blocked"
 fi
 if [ -r /sys/kernel/security/lockdown ] && grep -q '\[integrity\]\|\[confidentiality\]' /sys/kernel/security/lockdown; then
@@ -112,12 +117,54 @@ install -m755 "$B/disk2glance.sh" "$PREFIX/bin/disk2glance"
 install -m755 "$B/bin/dbdctl" "$B/bin/update-img" "$B/bin/jq" "$PREFIX/bin/"
 install -m644 "$KO_SRC" "$(dirname "$KO_SRC")/dattobd.ko.sha256" "$PREFIX/modules/$KVER/"
 install -m644 "$B/VERSION" "$PREFIX/VERSION"
+install -m755 "$B/install.sh" "$PREFIX/install.sh"   # for --uninstall after the bundle dir is gone
+# SELinux (RED OS, CentOS): a module file labelled usr_t can be loaded from a login shell but
+# not from a systemd service (disk2glance --detach) -> label the modules dir modules_object_t
+if command -v selinuxenabled >/dev/null && selinuxenabled; then
+  if command -v semanage >/dev/null; then
+    semanage fcontext -a -t modules_object_t "$PREFIX/modules(/.*)?" 2>/dev/null \
+      || semanage fcontext -m -t modules_object_t "$PREFIX/modules(/.*)?" 2>/dev/null || true
+    restorecon -R "$PREFIX/modules"
+  else
+    chcon -R -t modules_object_t "$PREFIX/modules"
+  fi
+  log "SELinux: $PREFIX/modules labelled modules_object_t"
+fi
 ln -sf "$PREFIX/bin/disk2glance" /usr/local/sbin/disk2glance
 # sudo secure_path on RHEL-likes has no /usr/local/sbin
 [ -e /usr/sbin/disk2glance ] || ln -s "$PREFIX/bin/disk2glance" /usr/sbin/disk2glance
-install -d -m700 "$CONF"
-[ -n "$OPENRC" ] && install -m600 "$OPENRC" "$CONF/openrc" && log "credentials -> $CONF/openrc"
-[ -n "$PROPSF" ] && install -m644 "$PROPSF" "$CONF/props.json" && log "image properties -> $CONF/props.json"
+install -d -m700 "$CONF" "$PREFIX/examples"
+install -m644 "$B"/examples/* "$PREFIX/examples/"
+
+# credentials: copy the given file, or leave a template to fill in
+if [ -n "$OPENRC" ]; then
+  grep -qE '^[[:space:]]*read[[:space:]]' "$OPENRC" && warn "$OPENRC asks for the password interactively ('read ...'): edit $CONF/openrc, put export OS_PASSWORD='...' and remove the prompt"
+  install -m600 "$OPENRC" "$CONF/openrc" && log "credentials: $OPENRC -> $CONF/openrc"
+elif [ ! -f "$CONF/openrc" ]; then
+  install -m600 "$B/examples/openrc.example" "$CONF/openrc"
+  TODO_OPENRC=1
+fi
+
+# image properties: copy the given file, or pick the example for this OS
+if [ -n "$PROPSF" ]; then
+  install -m644 "$PROPSF" "$CONF/props.json" && log "image properties: $PROPSF -> $CONF/props.json"
+elif [ ! -f "$CONF/props.json" ]; then
+  . /etc/os-release
+  case "$ID:${VERSION_ID:-}" in
+    ubuntu:24.04*) ex=ubuntu-24.04 ;;
+    redos:8*)      ex=redos-8 ;;
+    redos:7.3*)    ex=redos-7.3 ;;
+    centos:7*)     ex=centos-7 ;;
+    astra:1.7*)    ex=astra-1.7 ;;
+    astra:1.8*)    ex=astra-1.8 ;;
+    *)             ex=linux ;;
+  esac
+  install -m644 "$B/examples/props-$ex.json" "$CONF/props.json"
+  log "image properties: example props-$ex.json -> $CONF/props.json (check it)"
+fi
+
+# options file
+[ -f "$CONF/disk2glance.conf" ] || install -m644 "$B/examples/disk2glance.conf.example" "$CONF/disk2glance.conf"
 
 # --- self-test: load and unload the module ------------------------------------------
 if [ -e /proc/datto-info ]; then
@@ -128,5 +175,8 @@ else
   log "module load test OK"
 fi
 log "installed to $PREFIX (module is NOT loaded at boot; disk2glance loads it only while running)"
-[ -f "$CONF/openrc" ] || log "next: put OpenStack credentials into $CONF/openrc (see docs/usage.md)"
-log "then: disk2glance --check   and   disk2glance --name <image-name>"
+log "config: $CONF/openrc (credentials), $CONF/props.json (image properties), $CONF/disk2glance.conf (options)"
+if [ "${TODO_OPENRC:-0}" = 1 ]; then
+  log "NEXT: fill in the credentials template: $CONF/openrc  (see docs/quickstart.md, step 4)"
+fi
+log "then: sudo disk2glance --check   and   sudo disk2glance --detach --name <image-name>"

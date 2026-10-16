@@ -1,0 +1,7 @@
+{
+  "hw_qemu_guest_agent": "yes",
+  "os_admin_user": "centos",
+  "os_distro": "centos",
+  "os_type": "linux",
+  "os_version": "7"
+}

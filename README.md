@@ -22,18 +22,22 @@
 | **Модуль dattobd** | модуль ядра Linux, который делает снапшоты томов без остановки ФС. Собирается под конкретное ядро. |
 | **Сборочная ВМ** | вспомогательная Linux-ВМ, на которой собирают модули dattobd под новые ядра, чтобы добавить их в бандл. В переносе не участвует; нужна только тем, кто сопровождает бандл. |
 
-Архив: [Releases](https://github.com/jaland-hara/disk2glance/releases) → `disk2glance-0.4.0.tar.gz`.
+**Как начать: [docs/quickstart.md](docs/quickstart.md)** — установка и перенос по шагам.
+
+Коротко: архив из [Releases](https://github.com/jaland-hara/disk2glance/releases) скопировать на исходную ВМ, затем
 
 ```bash
-tar xzf disk2glance-0.4.0.tar.gz && cd disk2glance-0.4.0
-sudo ./install.sh --openrc openrc --props props.json
-sudo disk2glance --check
-sudo disk2glance --detach --name myvm-migr-1   # фоном, лог в /var/log/disk2glance.log
+tar xzf disk2glance-0.4.1.tar.gz && cd disk2glance-0.4.1
+sudo ./install.sh                         # создаст /etc/disk2glance/{openrc,props.json,disk2glance.conf}
+sudo vi /etc/disk2glance/openrc           # вписать учётные данные целевого облака
+sudo disk2glance --check                  # проверка без переноса
+sudo disk2glance --detach --name myvm-1   # перенос в фоне, лог: /var/log/disk2glance.log
 ```
 
 ## Документация
 
-- [docs/usage.md](docs/usage.md): установка, проверка, перенос, создание новой ВМ, удаление агента, ошибки.
+- [docs/quickstart.md](docs/quickstart.md): **перенос по шагам** — установка, учётные данные, проверка, запуск, новая ВМ.
+- [docs/usage.md](docs/usage.md): справочник — файлы конфигурации, параметры, установщик, ошибки.
 - [docs/how-it-works.md](docs/how-it-works.md): что агент делает внутри гостевой ОС, что меняет в системе, нагрузка.
 - [docs/limitations.md](docs/limitations.md): ограничения, их причины и можно ли их снять.
 - [docs/build-modules.md](docs/build-modules.md): сборка модулей dattobd под новые ядра на сборочной ВМ.
@@ -51,7 +55,7 @@ sudo disk2glance --detach --name myvm-migr-1   # фоном, лог в /var/log/
 | `modules/<ядро>/dattobd.ko` | готовые модули (dattobd 0.12.2) |
 | `bin/` | статические `dbdctl`, `update-img` (dattobd) и `jq` 1.7.1 |
 | `setup-testload.sh`, `verify-clone.sh` | скрипты проверки: нагрузка на исходной ВМ (PostgreSQL + pgbench + метки времени) и проверка данных на новой ВМ |
-| `examples/` | шаблоны `openrc` и `props.json` |
+| `examples/` | шаблоны `openrc`, `disk2glance.conf` и `props.json` для проверенных ОС |
 
 Учётные данные в репозиторий не попадают. На исходной ВМ они лежат в `/etc/disk2glance/openrc` (600).
 

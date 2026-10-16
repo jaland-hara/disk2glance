@@ -1,0 +1,8 @@
+{
+  "hw_qemu_guest_agent": "yes",
+  "hw_vif_model": "virtio",
+  "os_admin_user": "redos",
+  "os_distro": "redos",
+  "os_type": "linux",
+  "os_version": "8.0"
+}

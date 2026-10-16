@@ -30,7 +30,7 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 У каждого модуля рядом лежит `dattobd.ko.sha256`. `install.sh` проверяет его и сверяет
 `vermagic` модуля с `uname -r`.
 
-### Готовые модули (бандл 0.4.0)
+### Готовые модули (бандл 0.4.1)
 
 | Ядро | Дистрибутив | Где собран | Пакеты для сборки (из репозиториев дистрибутива) |
 |---|---|---|---|
@@ -60,6 +60,8 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 | `sync` | coreutils | сброс грязных данных перед снапшотом |
 | `systemd-run` (только с `--detach`) | systemd | запуск агента отдельным юнитом вне сессии пользователя |
 | `pgrep` | procps | остановка своего конвейера (dd, curl) при сигнале |
+| `stat` | coreutils | проверка прав файла с учётными данными |
+| `semanage`, `restorecon` или `chcon` (только при включённом SELinux, вызывает установщик) | policycoreutils | метка `modules_object_t` для каталога модулей |
 | `insmod`, `rmmod`, `modinfo` | kmod | загрузка и выгрузка dattobd |
 | `pv` (необязательно) | pv | прогресс загрузки (`/run/disk2glance/progress.log`) |
 

@@ -6,37 +6,60 @@
 # everything else (partition table, BIOS boot, EFI, swap, LVM metadata, free
 # extents, gaps, GPT backup) is read straight from the disk.
 #
-# Usage: disk2glance [--check] [--detach] [--disk /dev/vda] [--name NAME] [--cow-mb N] [--keep-module]
-#   --check        preflight only: auth, Glance endpoint, layout, module load; no upload
+# Usage: disk2glance [--check] [--detach] [--name NAME] [--openrc FILE] [--props FILE]
+#                    [--config FILE] [--disk /dev/vda] [--cow-mb N] [--keep-module]
+#   --check        preflight only: config files, auth, Glance endpoint, layout, module load; no upload
+#   --openrc FILE  cloud credentials (OS_* variables)      default: /etc/disk2glance/openrc
+#   --props FILE   image properties (JSON)                 default: /etc/disk2glance/props.json
+#   --config FILE  defaults for these options (KEY=value)  default: /etc/disk2glance/disk2glance.conf
 #   --detach       run as a transient systemd unit (survives logout / logind KillUserProcesses);
 #                  log: /var/log/disk2glance.log
 #   --cow-mb N     COW file size per snapshot in MiB (default: dattobd's 10% of the volume);
 #                  smaller = shorter write pause at snapshot time on busy disks, but overflows sooner
 #   --keep-module  leave dattobd loaded afterwards (default: unload if we loaded it)
-# Config: /etc/disk2glance/openrc (OS_* variables), /etc/disk2glance/props.json (image properties)
+# Command-line options override the config file.
 set -euo pipefail
 PREFIX=${PREFIX:-/opt/disk2glance}
 export PATH=$PREFIX/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 VERSION=$(cat "$PREFIX/VERSION" 2>/dev/null || echo dev)
 
-DISK=${DISK:-/dev/vda}
-ENVF=${ENVF:-/etc/disk2glance/openrc}
+# defaults, then the config file, then command-line options
+DISK=/dev/vda
+OPENRC=${ENVF:-/etc/disk2glance/openrc}
 PROPS=${PROPS:-/etc/disk2glance/props.json}
+COW_MB=
+CONFIG=/etc/disk2glance/disk2glance.conf
+ARGS=("$@")
+for ((i=0; i<${#ARGS[@]}; i++)); do [ "${ARGS[$i]}" = --config ] && CONFIG=${ARGS[$((i+1))]:-}; done
+if [ -f "$CONFIG" ]; then
+  # only KEY=value lines for known keys are taken; the file is not executed
+  while IFS='=' read -r k v; do
+    v=${v%\"}; v=${v#\"}; v=${v%\'}; v=${v#\'}
+    case $k in
+      OPENRC) OPENRC=$v ;; PROPS) PROPS=$v ;; DISK) DISK=$v ;; COW_MB) COW_MB=$v ;;
+    esac
+  done < <(grep -E '^[A-Z_]+=' "$CONFIG")
+else
+  for a in ${ARGS[@]+"${ARGS[@]}"}; do
+    [ "$a" = --config ] && { echo "config file $CONFIG not found" >&2; exit 64; }
+  done
+fi
 NAME=
 CHECK=0
 KEEP_MODULE=0
-COW_MB=
 DETACH=0
-ARGS=("$@")
 while [ $# -gt 0 ]; do
   case $1 in
     --check) CHECK=1 ;;
+    --openrc) OPENRC=$2; shift ;;
+    --props) PROPS=$2; shift ;;
+    --config) shift ;;
     --disk) DISK=$2; shift ;;
     --name) NAME=$2; shift ;;
     --keep-module) KEEP_MODULE=1 ;;
     --cow-mb) COW_MB=$2; shift ;;
     --detach) DETACH=1 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     -*) echo "unknown option $1" >&2; exit 64 ;;
     *) NAME=$1 ;;
   esac
@@ -73,15 +96,41 @@ LOADED_BY_US=0
 load_module() {
   [ -e /proc/datto-info ] && return 0
   local ko="$PREFIX/modules/$(uname -r)/dattobd.ko"
-  if [ -f "$ko" ]; then insmod "$ko" || die "insmod $ko failed (Secure Boot / integrity control?)"
-  else modprobe dattobd 2>/dev/null || die "no dattobd module for kernel $(uname -r) — see docs/build-modules.md"
+  if [ -f "$ko" ]; then
+    insmod "$ko" || die "insmod $ko failed: check dmesg; causes: Secure Boot / lockdown / Astra ZPS, or SELinux label (ls -Z $ko must show modules_object_t; reinstall with install.sh)"
+  else
+    modprobe dattobd 2>/dev/null || die "no dattobd module for kernel $(uname -r) — see docs/build-modules.md"
   fi
   LOADED_BY_US=1
 }
 
-# --- auth: token + Glance endpoint from the catalog ------------------------------
+# --- config files ------------------------------------------------------------------
+[ -f "$OPENRC" ] || die "credentials file $OPENRC not found — create it (docs/quickstart.md, step 4) or pass --openrc FILE"
+# openrc files downloaded from cloud portals often ask for the password interactively
+# ('read -s OS_PASSWORD_INPUT'); the agent runs unattended, so the password must be in the file
+if grep -qE '^[[:space:]]*read[[:space:]]' "$OPENRC"; then
+  die "$OPENRC asks for input ('read ...'): put the password into it as: export OS_PASSWORD='...' and remove the read/prompt lines"
+fi
+if grep -qE '^[^#]*="<' "$OPENRC"; then
+  die "$OPENRC is still a template: replace the <...> values (docs/quickstart.md, step 4)"
+fi
+perm=$(stat -c %a "$OPENRC"); case $perm in 600|400) ;; *) log "WARN: $OPENRC has mode $perm — run: chmod 600 $OPENRC" ;; esac
 # shellcheck disable=SC1090
-. "$ENVF"
+. "$OPENRC"
+missing=
+for v in OS_AUTH_URL; do [ -n "${!v:-}" ] || missing="$missing $v"; done
+if [ -z "${OS_APPLICATION_CREDENTIAL_ID:-}" ]; then
+  for v in OS_USERNAME OS_PASSWORD OS_PROJECT_ID; do [ -n "${!v:-}" ] || missing="$missing $v"; done
+fi
+[ -z "$missing" ] || die "$OPENRC does not set:$missing"
+if [ -f "$PROPS" ]; then
+  jq -e 'type=="object"' "$PROPS" >/dev/null 2>&1 || die "$PROPS is not a JSON object"
+  log "credentials: $OPENRC; image properties: $PROPS ($(jq -r 'keys|join(",")' "$PROPS"))"
+else
+  log "credentials: $OPENRC; WARN: no image properties file $PROPS — the image gets no os_*/hw_* properties"
+fi
+
+# --- auth: token + Glance endpoint from the catalog ------------------------------
 if [ -n "${OS_APPLICATION_CREDENTIAL_ID:-}" ]; then
   auth_body=$(jq -n --arg id "$OS_APPLICATION_CREDENTIAL_ID" --arg s "$OS_APPLICATION_CREDENTIAL_SECRET" \
     '{auth:{identity:{methods:["application_credential"],application_credential:{id:$id,secret:$s}}}}')
@@ -260,7 +309,7 @@ progress() { # pv if present, else plain pass-through
 }
 
 # --- create image + upload -------------------------------------------------------
-props='{}'; [ -f "$PROPS" ] && props=$(cat "$PROPS")
+props='{}'; [ -f "$PROPS" ] && props=$(jq -c . "$PROPS")
 body=$(jq -n --arg n "$NAME" --arg ts "$T_SNAP" --arg h "$(hostname -s)" --arg v "$VERSION" --argjson p "$props" \
   '$p + {name:$n, disk_format:"raw", container_format:"bare", visibility:"private",
          d2g_source_host:$h, d2g_snapshot_time:$ts, d2g_version:$v}')

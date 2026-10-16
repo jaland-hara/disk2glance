@@ -1,10 +1,23 @@
-# /etc/disk2glance/openrc — mode 600, root only. Never commit real values.
-export OS_AUTH_URL="https://infra.mail.ru:35357/v3/"
-export OS_PROJECT_ID="<project id>"
-export OS_REGION_NAME="RegionOne"
-export OS_USERNAME="<service user>"
-export OS_USER_DOMAIN_NAME="<user domain>"
-export OS_PASSWORD="<password>"
-# or, instead of user/password (if the cloud supports application credentials):
+# /etc/disk2glance/openrc — учётные данные целевого облака для disk2glance.
+# Права 600, владелец root. В репозитории и в переписке реальные значения не храните.
+#
+# Где взять значения в VK Cloud: личный кабинет → проект → «Доступ по API».
+# Там же можно скачать файл «openrc версии 3»; из него берутся все строки ниже.
+# ВАЖНО: в скачанном файле пароль запрашивается с клавиатуры (строки с 'read').
+# disk2glance работает без участия человека, поэтому пароль должен быть записан
+# в OS_PASSWORD прямо здесь, а строки с 'read'/'echo' нужно удалить.
+#
+# Рекомендуется отдельный сервисный пользователь проекта с правом создавать образы:
+# его пароль лежит на исходной ВМ, пока идёт перенос.
+
+export OS_AUTH_URL="https://infra.mail.ru:35357/v3/"   # адрес Keystone (VK Cloud: этот)
+export OS_PROJECT_ID="<ID проекта>"                    # «Доступ по API» → Project ID
+export OS_REGION_NAME="RegionOne"                      # регион (VK Cloud Москва: RegionOne)
+export OS_USERNAME="<имя пользователя>"                # логин (email) или имя сервисного пользователя
+export OS_USER_DOMAIN_NAME="<домен пользователя>"      # «Доступ по API» → User Domain Name
+export OS_PASSWORD="<пароль>"                          # пароль этого пользователя
+
+# Вместо логина и пароля можно использовать application credentials,
+# если облако их поддерживает (тогда строки OS_USERNAME/OS_PASSWORD не нужны):
 # export OS_APPLICATION_CREDENTIAL_ID="<id>"
 # export OS_APPLICATION_CREDENTIAL_SECRET="<secret>"

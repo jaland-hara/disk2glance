@@ -2,75 +2,97 @@
 
 Термины (исходная ВМ, новая ВМ, бандл, сборочная ВМ) объяснены в [README](../README.md#термины).
 
-## 0. Что понадобится
+Пошаговая инструкция от установки до новой ВМ: **[quickstart.md](quickstart.md)**. Этот документ —
+справочник: файлы, параметры, поведение установщика, ошибки.
 
-- Исходная ВМ: Linux-ВМ, которую нужно перенести (x86_64, диск с разделами, ФС ext4/ext3/xfs прямо на
-  разделах или на линейных томах LVM), с доступом root.
+## 0. Требования
+
+- Исходная ВМ: Linux x86_64, диск с разделами, ФС ext4/ext3/xfs на разделах или на линейных
+  томах LVM, доступ root.
 - Исходящий HTTPS с исходной ВМ до Keystone и Glance целевого облака (в VK Cloud это
   `infra.mail.ru:35357` и `infra.mail.ru:9292`).
-- Учётная запись в целевом проекте с правом создавать образы. Лучше отдельная сервисная
-  учётка: её пароль будет лежать на исходной ВМ, пока идёт миграция.
-- Бандл `disk2glance-<версия>.tar.gz`, в котором есть модуль под ядро исходной ВМ (`uname -r`).
-  Список ядер есть в `modules/` бандла и в [../THIRD_PARTY.md](../THIRD_PARTY.md).
-  Если нужного ядра нет, см. [build-modules.md](build-modules.md).
+- Пользователь целевого проекта с правом создавать образы и включённым доступом по API.
+  Лучше отдельный: его пароль лежит на исходной ВМ, пока идёт перенос.
+- Модуль dattobd под ядро исходной ВМ (`uname -r`) в бандле. Список ядер есть в
+  [../THIRD_PARTY.md](../THIRD_PARTY.md); если нужного нет, см. [build-modules.md](build-modules.md).
 
-## 1. Подготовить конфигурацию
+## 1. Файлы конфигурации
 
-`openrc`: учётные данные, шаблон в [../examples/openrc.example](../examples/openrc.example).
+Все файлы лежат в `/etc/disk2glance/` (каталог доступен только root). Установщик создаёт их
+из шаблонов, если их ещё нет, и никогда не перезаписывает существующие.
+
+| Файл | Формат | Права | Создаётся установщиком | Шаблон |
+|---|---|---|---|---|
+| `openrc` | строки `export OS_…="…"` | 600 | шаблон с `<…>`, если не передан `--openrc` | [examples/openrc.example](../examples/openrc.example) |
+| `props.json` | JSON-объект свойств образа | 644 | пример под ОС исходной ВМ, если не передан `--props` | [examples/props-*.json](../examples/) |
+| `disk2glance.conf` | строки `КЛЮЧ=значение` | 644 | всегда, если нет | [examples/disk2glance.conf.example](../examples/disk2glance.conf.example) |
+
+**`openrc`**: переменные OpenStack. Обязательны `OS_AUTH_URL`, `OS_PROJECT_ID`,
+`OS_USERNAME`, `OS_PASSWORD` (и обычно `OS_USER_DOMAIN_NAME`, `OS_REGION_NAME`) либо пара
+`OS_APPLICATION_CREDENTIAL_ID` + `OS_APPLICATION_CREDENTIAL_SECRET`. Агент выполняет этот файл
+как shell-скрипт, поэтому в нём не должно быть интерактивных запросов (`read`), а значения
+`<…>` должны быть заменены. Агент проверяет оба условия и права 600.
+
+**`props.json`**: свойства, которые получит образ в Glance. Готовые примеры для проверенных ОС:
+
+| Файл | ОС |
+|---|---|
+| `props-ubuntu-24.04.json` | Ubuntu 24.04 |
+| `props-redos-8.json`, `props-redos-7.3.json` | RED OS 8, 7.3 |
+| `props-centos-7.json` | CentOS 7 |
+| `props-astra-1.7.json`, `props-astra-1.8.json` | Astra Linux SE 1.7, 1.8 |
+| `props-linux.json` | любая другая (минимальный набор) |
+
+Значимые ключи: `os_type`, `os_distro`, `os_version`, `os_admin_user`, `hw_vif_model`,
+`hw_qemu_guest_agent` (только если на исходной ВМ есть `qemu-guest-agent`), для UEFI-загрузки
+`hw_firmware_type: uefi` и `hw_machine_type: q35`. Свойства конкретного образа целевого облака
+можно посмотреть так: `openstack image show <образ> -f json -c properties`.
+
+**`disk2glance.conf`**: значения параметров по умолчанию (`OPENRC`, `PROPS`, `DISK`, `COW_MB`).
+Файл не выполняется: читаются только строки `КЛЮЧ=значение` для этих ключей.
+
+**Как сослаться на файлы при запуске.** Без параметров агент берёт файлы из `/etc/disk2glance/`.
+Другие пути передаются так: `--openrc FILE`, `--props FILE`, `--config FILE` (файл параметров со
+своими `OPENRC=`, `PROPS=` и т. д.). Параметры командной строки важнее файла параметров.
+Примеры в [quickstart.md](quickstart.md#где-лежат-файлы-и-как-на-них-сослаться).
+
+## 2. Установщик `install.sh`
 
 ```bash
-export OS_AUTH_URL="https://infra.mail.ru:35357/v3/"
-export OS_PROJECT_ID="<id проекта>"
-export OS_REGION_NAME="RegionOne"
-export OS_USERNAME="<сервисный пользователь>"
-export OS_USER_DOMAIN_NAME="<домен пользователя>"
-export OS_PASSWORD="<пароль>"
+sudo ./install.sh [--openrc FILE] [--props FILE] [--build]
+sudo /opt/disk2glance/install.sh --uninstall [--purge]
 ```
 
-`props.json`: свойства будущего образа. Их стоит взять у образа, из которого
-создавалась исходная ВМ, или у близкого образа целевого облака:
+| Параметр | Что делает |
+|---|---|
+| `--openrc FILE` | скопировать FILE в `/etc/disk2glance/openrc` (600) |
+| `--props FILE` | скопировать FILE в `/etc/disk2glance/props.json` |
+| `--build` | если готового модуля под ядро нет, собрать его на исходной ВМ (нужны `gcc`, `make`, заголовки ядра) |
+| `--uninstall` | удалить агент, модуль, лог; конфигурация остаётся |
+| `--purge` | вместе с `--uninstall`: удалить и `/etc/disk2glance` (с паролем) |
+
+**Офлайн** (архив скопирован на исходную ВМ): `tar xzf disk2glance-<версия>.tar.gz && cd disk2glance-<версия> && sudo ./install.sh`.
+
+**Онлайн** (исходная ВМ сама скачивает архив):
 
 ```bash
-openstack image show <похожий образ> -f json -c properties
-```
-
-Нужны ключи `os_distro`, `os_type`, `os_admin_user`, `hw_*`; служебные ключи
-(`os_hash_*`, `owner_*`, `stores` и т. п.) брать не надо. Пример лежит в
-[../examples/props-ubuntu24.json](../examples/props-ubuntu24.json). Для UEFI-ВМ добавьте
-`"hw_firmware_type": "uefi"` и `"hw_machine_type": "q35"`.
-
-## 2. Установить агент на исходную ВМ
-
-**Офлайн** (архив уже скопирован на исходную ВМ):
-
-```bash
-tar xzf disk2glance-0.4.0.tar.gz
-cd disk2glance-0.4.0
-sudo ./install.sh --openrc /path/to/openrc --props /path/to/props.json
-```
-
-**Онлайн** (исходная ВМ сама скачивает архив из GitHub Releases):
-
-```bash
-R=https://github.com/jaland-hara/disk2glance/releases/download/v0.4.0
+R=https://github.com/jaland-hara/disk2glance/releases/download/v0.4.1
 curl -fsSL $R/install.sh -o /tmp/d2g-install.sh
-sudo D2G_BUNDLE_URL=$R/disk2glance-0.4.0.tar.gz bash /tmp/d2g-install.sh --openrc /path/to/openrc --props /path/to/props.json
+sudo D2G_BUNDLE_URL=$R/disk2glance-0.4.1.tar.gz bash /tmp/d2g-install.sh
 ```
 
-Скачать архив для офлайн-установки можно там же: `$R/disk2glance-0.4.0.tar.gz`, контрольная
-сумма лежит в `$R/disk2glance-0.4.0.tar.gz.sha256`.
-
-Если рядом лежит `<архив>.sha256`, установщик сверяет контрольную сумму архива.
+Если рядом с архивом лежит `<архив>.sha256`, установщик сверяет контрольную сумму.
 
 Что делает установщик:
 - проверяет архитектуру, наличие нужных команд, Secure Boot, kernel lockdown, ЗПС Astra;
 - ищет модуль под `uname -r`, сверяет sha256 и `vermagic`;
-- копирует всё в `/opt/disk2glance`, создаёт ссылки `/usr/local/sbin/disk2glance` и `/usr/sbin/disk2glance` (на RHEL-подобных `sudo` не видит `/usr/local/sbin`);
+- копирует агент, модуль, утилиты, примеры и сам себя в `/opt/disk2glance`, создаёт ссылки
+  `/usr/local/sbin/disk2glance` и `/usr/sbin/disk2glance` (на RHEL-подобных `sudo` не видит
+  `/usr/local/sbin`);
+- создаёт недостающие файлы конфигурации в `/etc/disk2glance` (см. выше);
+- если включён SELinux (RED OS, CentOS), помечает каталог модулей типом `modules_object_t`:
+  иначе модуль загружается из обычной сессии, но не из фоновой службы (`--detach`);
 - один раз загружает и выгружает модуль для проверки. **В автозагрузку модуль не ставится.**
-
-Если готового модуля нет, а на исходной ВМ есть `gcc`, `make` и заголовки ядра, можно собрать модуль
-прямо там: `sudo ./install.sh --build`. На рабочих системах так обычно не делают: модуль
-лучше собрать на отдельной сборочной ВМ и добавить в бандл ([build-modules.md](build-modules.md)).
 
 ## 3. Проверка перед переносом
 
@@ -115,6 +137,9 @@ sudo disk2glance --name myvm-migr-1
 | Параметр | Что делает |
 |---|---|
 | `--name NAME` | имя образа (по умолчанию `<hostname>-<дата-время>`) |
+| `--openrc FILE` | файл учётных данных (по умолчанию `/etc/disk2glance/openrc`) |
+| `--props FILE` | свойства образа (по умолчанию `/etc/disk2glance/props.json`) |
+| `--config FILE` | файл параметров (по умолчанию `/etc/disk2glance/disk2glance.conf`) |
 | `--disk /dev/vdX` | какой диск переносить (по умолчанию `/dev/vda`) |
 | `--cow-mb N` | размер COW-файла на каждый снапшот, МиБ (по умолчанию 10% тома). Меньше — короче пауза записи при создании снапшота на нагруженном диске, но COW быстрее переполняется. См. [how-it-works.md](how-it-works.md#пауза-записи-при-создании-снапшота) |
 | `--check` | только проверка, без снапшотов и загрузки |
@@ -178,7 +203,7 @@ openstack server create myvm --image <id образа> --flavor <flavor> \
 На исходной ВМ:
 
 ```bash
-sudo /path/to/disk2glance-0.4.0/install.sh --uninstall --purge
+sudo /opt/disk2glance/install.sh --uninstall --purge
 ```
 
 Команда удаляет `/opt/disk2glance`, `/etc/disk2glance` (вместе с паролем) и выгружает модуль.
@@ -188,8 +213,13 @@ sudo /path/to/disk2glance-0.4.0/install.sh --uninstall --purge
 
 | Сообщение | Причина и что делать |
 |---|---|
+| `credentials file ... not found` | нет `/etc/disk2glance/openrc` и не передан `--openrc`: создайте файл ([quickstart.md](quickstart.md), шаг 4) |
+| `... asks for input ('read ...')` | openrc скачан из личного кабинета и спрашивает пароль: впишите `export OS_PASSWORD="..."`, удалите строки `read`/`echo` |
+| `... is still a template` | в openrc остались значения `<…>`: замените их |
+| `... does not set: OS_...` | в openrc нет обязательной переменной |
+| `... is not a JSON object` | ошибка в props.json: проверьте запятые и кавычки (`jq . props.json`) |
 | `no dattobd module for kernel X` | в бандле нет модуля под это ядро: собрать по [build-modules.md](build-modules.md) или `install.sh --build` |
-| `insmod ... failed` | Secure Boot, lockdown или ЗПС Astra; детали в `dmesg` |
+| `insmod ... failed` | Secure Boot, lockdown или ЗПС Astra (детали в `dmesg`), либо метка SELinux: `ls -Z /opt/disk2glance/modules/*/dattobd.ko` должна показывать `modules_object_t`; переустановите `install.sh` |
 | `... holds dm-crypt device` / `only LVM is supported` | раздел зашифрован или под mdraid/multipath: не поддерживается |
 | `LV ... has a 'thin-pool' segment` (или raid, striped) | нелинейный LV: не поддерживается |
 | `VG spans disks` | группа томов на нескольких дисках: не поддерживается |

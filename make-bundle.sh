@@ -11,7 +11,7 @@ OUT=dist/$NAME
 rm -rf "$OUT" && mkdir -p "$OUT/src" dist
 
 cp VERSION install.sh disk2glance.sh "$OUT/"
-cp -r bin modules docs THIRD_PARTY.md "$OUT/"
+cp -r bin modules docs examples THIRD_PARTY.md README.md "$OUT/"
 chmod 755 "$OUT/install.sh" "$OUT/disk2glance.sh" "$OUT"/bin/*
 
 # dattobd source of the same tag the modules were built from
