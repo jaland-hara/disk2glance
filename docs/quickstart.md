@@ -18,8 +18,11 @@ lsblk -f          # разделы и файловые системы
 Подходит, если:
 - архитектура x86_64;
 - файловые системы ext4, ext3 или xfs, на разделах или на линейных томах LVM;
-- ядро есть в списке модулей бандла: [THIRD_PARTY.md](../THIRD_PARTY.md#готовые-модули-бандл-041).
+- ядро есть в списке модулей бандла: [THIRD_PARTY.md](../THIRD_PARTY.md#готовые-модули-бандл-042).
   Если ядра нет, модуль собирают отдельно ([build-modules.md](build-modules.md)).
+- исходная ВМ уже работает на KVM (другое облако OpenStack, Yandex Cloud, Proxmox) — тогда
+  драйверы готовы. Если она на VMware, Hyper-V или Xen, сначала подготовьте её по
+  [guest-drivers.md](guest-drivers.md) (5–10 минут, без перезагрузки);
 - с исходной ВМ открыт исходящий HTTPS до API целевого облака (в VK Cloud это
   `infra.mail.ru`, порты 35357 и 9292). Проверка:
 
@@ -42,8 +45,13 @@ lsblk -f          # разделы и файловые системы
 | Пароль | | пароль этого пользователя |
 
 Доступ по API должен быть включён для пользователя. В VK Cloud он включается на той же
-странице. Лучше завести отдельного пользователя проекта только для переноса: его пароль
-будет храниться на исходной ВМ, пока идёт перенос.
+странице.
+
+**Рекомендуется сервисная учётная запись** (одна на группу сотрудников или волну переноса)
+с ролью «Администратор виртуальных машин»: её пароль хранится на исходной ВМ, пока идёт
+перенос, и её легко отключить после. Как создать и какие роли нужны —
+[service-accounts.md](service-accounts.md). Для сервисной учётной записи имя пользователя
+имеет вид `svc-<ID проекта>-<имя>`, домен — `service-users`.
 
 ## Шаг 3. Установить агент
 
@@ -52,21 +60,21 @@ lsblk -f          # разделы и файловые системы
 **А. Исходная ВМ сама скачивает с GitHub:**
 
 ```bash
-curl -fsSLO https://github.com/jaland-hara/disk2glance/releases/download/v0.4.1/disk2glance-0.4.1.tar.gz
+curl -fsSLO https://github.com/jaland-hara/disk2glance/releases/download/v0.4.2/disk2glance-0.4.2.tar.gz
 ```
 
-**Б. Без интернета на исходной ВМ:** скачайте `disk2glance-0.4.1.tar.gz` со страницы
+**Б. Без интернета на исходной ВМ:** скачайте `disk2glance-0.4.2.tar.gz` со страницы
 [Releases](https://github.com/jaland-hara/disk2glance/releases) на свой компьютер и скопируйте:
 
 ```bash
-scp disk2glance-0.4.1.tar.gz root@<исходная-ВМ>:/root/
+scp disk2glance-0.4.2.tar.gz root@<исходная-ВМ>:/root/
 ```
 
 Распакуйте и установите:
 
 ```bash
-tar xzf disk2glance-0.4.1.tar.gz
-cd disk2glance-0.4.1
+tar xzf disk2glance-0.4.2.tar.gz
+cd disk2glance-0.4.2
 sudo ./install.sh
 ```
 
@@ -128,16 +136,24 @@ cat /etc/disk2glance/props.json
 sudo disk2glance --check
 ```
 
-Агент проверит файлы конфигурации, вход в облако, разметку диска и загрузку модуля, но
-ничего не скопирует. Успешная проверка заканчивается строкой `CHECK OK`. Пример:
+Агент проверит файлы конфигурации, вход в облако, разметку диска, загрузку модуля,
+готовность гостевой ОС к KVM и право учётной записи создавать образы (создаст и сразу удалит
+пустой тестовый образ), но ничего не скопирует. Пример успешной проверки:
 
 ```
 credentials: /etc/disk2glance/openrc; image properties: /etc/disk2glance/props.json (...)
 auth OK, Glance https://infra.mail.ru:9292
   /dev/vda1 start=1048576 size=21473771008 fs=ext4 mnt=/ -> snap
 dattobd 0.12.2 loaded
+guest: hypervisor now: kvm (target: KVM, virtio devices)
+guest: OK for KVM (virtio drivers available at boot, fstab by UUID/LABEL)
+permissions: image create/delete in Glance OK
 CHECK OK: image would be 21474836480 bytes raw
 ```
+
+Если есть строки `WARN` про гостевую ОС, итог будет `CHECK OK, BUT ...`: исправьте их по
+[guest-drivers.md](guest-drivers.md), иначе новая ВМ может не загрузиться. Если нет права
+создавать образы — см. [service-accounts.md](service-accounts.md).
 
 Если вместо этого `ERROR: …`, в сообщении написано, что исправить (например, какая
 переменная не задана в openrc). Разбор ошибок есть в [usage.md](usage.md#если-что-то-пошло-не-так).

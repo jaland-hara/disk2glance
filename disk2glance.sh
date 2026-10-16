@@ -235,11 +235,76 @@ done
 load_module
 log "dattobd $(jq -r .version /proc/datto-info) loaded"
 
+# --- guest readiness for KVM (VK Cloud and other OpenStack clouds) -----------------
+# The agent copies the disk as is and changes nothing in the guest. These checks only
+# warn about what would stop the new VM from booting or reaching the network.
+guest_checks() {
+  local kv virt cfg rd lister mods m warn=0
+  kv=$(uname -r)
+  virt=$(systemd-detect-virt 2>/dev/null || echo unknown)
+  log "guest: hypervisor now: $virt (target: KVM, virtio devices)"
+  cfg=/boot/config-$kv
+  if [ -f "$cfg" ]; then
+    for m in VIRTIO_PCI VIRTIO_BLK VIRTIO_NET; do
+      case $(grep -E "^CONFIG_$m=" "$cfg" | cut -d= -f2) in
+        y) ;;
+        m) mods="${mods:-} $(echo $m | tr 'A-Z' 'a-z')" ;;
+        *) log "  WARN: kernel has no CONFIG_$m — the new VM will not see its disk/network"; warn=1 ;;
+      esac
+    done
+  fi
+  # disk drivers built as modules must be in the initramfs, or the root fs is not found at boot
+  rd=; for f in /boot/initramfs-$kv.img /boot/initrd.img-$kv /boot/initrd-$kv; do [ -f "$f" ] && rd=$f && break; done
+  if command -v lsinitrd >/dev/null; then lister="lsinitrd"; elif command -v lsinitramfs >/dev/null; then lister="lsinitramfs"; fi
+  # listing goes to a file: 'lister | grep -q' under pipefail reads grep's early exit as failure
+  rm -f "$WORK/initrd.list"
+  if [ -n "$rd" ] && [ -n "${lister:-}" ]; then $lister "$rd" >"$WORK/initrd.list" 2>/dev/null || true; fi
+  for m in ${mods:-}; do
+    [ "$m" = virtio_net ] && continue          # network driver is loaded after boot, from /lib/modules
+    if [ -s "$WORK/initrd.list" ]; then
+      grep -q "/$m\.ko" "$WORK/initrd.list" \
+        || { log "  WARN: $m is a module but missing from $rd — add it before migrating (docs/guest-drivers.md)"; warn=1; }
+    else
+      log "  note: cannot inspect initramfs for $m (no lsinitrd/lsinitramfs)"
+    fi
+  done
+  # disk names change to /dev/vdX on KVM: fstab must not use /dev/sdX, /dev/xvdX, /dev/hdX
+  if grep -E '^[[:space:]]*/dev/(sd|xvd|hd)[a-z]' /etc/fstab >/dev/null 2>&1; then
+    log "  WARN: /etc/fstab uses /dev/sdX-style names; on KVM disks become /dev/vdX — use UUID= or LABEL="; warn=1
+  fi
+  command -v cloud-init >/dev/null \
+    || { log "  WARN: cloud-init not installed: network config bound to the old interface name/MAC may not come up on the new VM"; warn=1; }
+  if [ -f "$PROPS" ] && [ "$(jq -r '.hw_qemu_guest_agent // empty' "$PROPS")" = yes ] && ! command -v qemu-ga >/dev/null; then
+    log "  WARN: props.json sets hw_qemu_guest_agent=yes but qemu-guest-agent is not installed"; warn=1
+  fi
+  GUEST_WARN=$warn
+  [ "$warn" = 0 ] && log "guest: OK for KVM (virtio drivers available at boot, fstab by UUID/LABEL)"
+  return 0
+}
+
+# --- permission check: can this account create images? ------------------------------
+perm_check() {
+  local id
+  id=$(curl -sS --fail -H "X-Auth-Token: $TOKEN" -H 'Content-Type: application/json' \
+    -d '{"name":"disk2glance-permission-check","disk_format":"raw","container_format":"bare","visibility":"private"}' \
+    "${GLANCE%/}/v2/images" | jq -r .id) || die "this account cannot create images in Glance (see docs/service-accounts.md)"
+  curl -sS --fail -X DELETE -H "X-Auth-Token: $TOKEN" "${GLANCE%/}/v2/images/$id" >/dev/null \
+    || log "WARN: test image $id could not be deleted — remove it by hand"
+  log "permissions: image create/delete in Glance OK"
+}
+
 if [ "$CHECK" = 1 ]; then
+  guest_checks
+  perm_check
   if [ "$LOADED_BY_US" = 1 ] && [ "$KEEP_MODULE" = 0 ]; then rmmod dattobd; fi
-  log "CHECK OK: image would be $DISK_BYTES bytes raw"
+  if [ "${GUEST_WARN:-0}" = 1 ]; then
+    log "CHECK OK, BUT see the guest WARN lines above: fix them before migrating or the new VM may not boot (docs/guest-drivers.md)"
+  else
+    log "CHECK OK: image would be $DISK_BYTES bytes raw"
+  fi
   exit 0
 fi
+guest_checks
 
 # --- snapshots -------------------------------------------------------------------
 declare -A SNAPDEV

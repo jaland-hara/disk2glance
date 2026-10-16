@@ -30,7 +30,7 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 У каждого модуля рядом лежит `dattobd.ko.sha256`. `install.sh` проверяет его и сверяет
 `vermagic` модуля с `uname -r`.
 
-### Готовые модули (бандл 0.4.1)
+### Готовые модули (бандл 0.4.2)
 
 | Ядро | Дистрибутив | Где собран | Пакеты для сборки (из репозиториев дистрибутива) |
 |---|---|---|---|
@@ -59,6 +59,8 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 | `dmsetup` (только при LVM) | device-mapper (ставится вместе с lvm2) | таблица сегментов LV: где экстенты LV лежат на диске |
 | `sync` | coreutils | сброс грязных данных перед снапшотом |
 | `systemd-run` (только с `--detach`) | systemd | запуск агента отдельным юнитом вне сессии пользователя |
+| `systemd-detect-virt` (необязательно) | systemd | какой гипервизор сейчас (только для сообщения в `--check`) |
+| `lsinitrd` / `lsinitramfs` (необязательно) | dracut / initramfs-tools | есть ли драйверы virtio в initramfs |
 | `pgrep` | procps | остановка своего конвейера (dd, curl) при сигнале |
 | `stat` | coreutils | проверка прав файла с учётными данными |
 | `semanage`, `restorecon` или `chcon` (только при включённом SELinux, вызывает установщик) | policycoreutils | метка `modules_object_t` для каталога модулей |

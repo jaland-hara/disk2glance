@@ -12,7 +12,8 @@
 - Исходящий HTTPS с исходной ВМ до Keystone и Glance целевого облака (в VK Cloud это
   `infra.mail.ru:35357` и `infra.mail.ru:9292`).
 - Пользователь целевого проекта с правом создавать образы и включённым доступом по API.
-  Лучше отдельный: его пароль лежит на исходной ВМ, пока идёт перенос.
+  Рекомендуется сервисная учётная запись: [service-accounts.md](service-accounts.md).
+- Драйверы virtio в гостевой ОС (есть у любой ВМ, работающей на KVM): [guest-drivers.md](guest-drivers.md).
 - Модуль dattobd под ядро исходной ВМ (`uname -r`) в бандле. Список ядер есть в
   [../THIRD_PARTY.md](../THIRD_PARTY.md); если нужного нет, см. [build-modules.md](build-modules.md).
 
@@ -76,9 +77,9 @@ sudo /opt/disk2glance/install.sh --uninstall [--purge]
 **Онлайн** (исходная ВМ сама скачивает архив):
 
 ```bash
-R=https://github.com/jaland-hara/disk2glance/releases/download/v0.4.1
+R=https://github.com/jaland-hara/disk2glance/releases/download/v0.4.2
 curl -fsSL $R/install.sh -o /tmp/d2g-install.sh
-sudo D2G_BUNDLE_URL=$R/disk2glance-0.4.1.tar.gz bash /tmp/d2g-install.sh
+sudo D2G_BUNDLE_URL=$R/disk2glance-0.4.2.tar.gz bash /tmp/d2g-install.sh
 ```
 
 Если рядом с архивом лежит `<архив>.sha256`, установщик сверяет контрольную сумму.
@@ -142,7 +143,7 @@ sudo disk2glance --name myvm-migr-1
 | `--config FILE` | файл параметров (по умолчанию `/etc/disk2glance/disk2glance.conf`) |
 | `--disk /dev/vdX` | какой диск переносить (по умолчанию `/dev/vda`) |
 | `--cow-mb N` | размер COW-файла на каждый снапшот, МиБ (по умолчанию 10% тома). Меньше — короче пауза записи при создании снапшота на нагруженном диске, но COW быстрее переполняется. См. [how-it-works.md](how-it-works.md#пауза-записи-при-создании-снапшота) |
-| `--check` | только проверка, без снапшотов и загрузки |
+| `--check` | только проверка, без снапшотов и загрузки: конфигурация, вход в облако, разметка, модуль, готовность гостевой ОС к KVM ([guest-drivers.md](guest-drivers.md)), право создавать образы (тестовый пустой образ создаётся и удаляется) |
 | `--detach` | запустить отдельным systemd-юнитом (переживает выход из сессии), лог в `/var/log/disk2glance.log` |
 | `--keep-module` | не выгружать dattobd после работы |
 
@@ -213,6 +214,8 @@ sudo /opt/disk2glance/install.sh --uninstall --purge
 
 | Сообщение | Причина и что делать |
 |---|---|
+| `this account cannot create images in Glance` | у учётной записи нет нужной роли: [service-accounts.md](service-accounts.md) |
+| `WARN: virtio_blk is a module but missing from ...` и другие `guest` WARN | гостевая ОС не готова к KVM: [guest-drivers.md](guest-drivers.md) |
 | `credentials file ... not found` | нет `/etc/disk2glance/openrc` и не передан `--openrc`: создайте файл ([quickstart.md](quickstart.md), шаг 4) |
 | `... asks for input ('read ...')` | openrc скачан из личного кабинета и спрашивает пароль: впишите `export OS_PASSWORD="..."`, удалите строки `read`/`echo` |
 | `... is still a template` | в openrc остались значения `<…>`: замените их |

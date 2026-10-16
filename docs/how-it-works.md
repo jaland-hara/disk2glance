@@ -40,6 +40,9 @@
    - раздел под mdraid или dm-crypt, LV не линейный (thin, raid, striped), группа томов
      на нескольких дисках, btrfs: агент **останавливается с ошибкой** (причины в
      [limitations.md](limitations.md)).
+3a. **Проверка гостевой ОС.** Агент проверяет, загрузится ли копия на KVM: драйверы virtio
+   в ядре и в initramfs, имена дисков в `/etc/fstab`, наличие cloud-init и гостевого агента.
+   Ничего не меняет, только предупреждает ([guest-drivers.md](guest-drivers.md)).
 4. **Загрузка модуля.** Если dattobd ещё не загружен, агент выполняет
    `insmod /opt/disk2glance/modules/$(uname -r)/dattobd.ko`. В автозагрузку модуль
    не прописывается.
