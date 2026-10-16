@@ -1,17 +1,19 @@
 #!/bin/bash
-# disk2rx (experimental) — send a live Linux disk to a d2g receiver in the target cloud, which
-# writes it straight into a Cinder volume. Same snapshot logic as disk2glance/disk2s3: mounted
-# ext3/ext4/xfs on partitions or linear LVM volumes are read from dattobd snapshots.
+# disk2rx (experimental) — send a live Linux disk into a Cinder volume of the target cloud
+# through a d2g receiver. Same snapshot logic as disk2glance/disk2s3: mounted ext3/ext4/xfs on
+# partitions or linear LVM volumes are read from dattobd snapshots.
 #
-# The disk is sent in independent parts over HTTPS with mutual TLS. The receiver keeps a journal
-# "part -> MD5": a restarted run skips parts it already has, and a later run (a new snapshot)
-# sends only the parts that changed (delta pass).
+# Control goes to the d2g orchestrator (enrollment, job, commands, reports), data goes to the
+# receiver that serves the job's volume, both over HTTPS with mutual TLS. The receiver keeps a
+# journal of block MD5s: a restarted run skips what it already has and a later run (a new
+# snapshot) sends only the blocks that changed (delta pass).
 #
 # Usage:
-#   disk2rx --enroll --name NAME --server rx01.d2g --connect IP --pin 'sha256//…' --token T
-#   disk2rx [--check] [--threads 8] [--disk /dev/vda] [--cow-mb N] [--keep-module] [--connect IP]
-#   --connect IP  receiver address to use (its grey IP over Direct Connect or its FIP);
-#                 the TLS name stays --server, so the certificate is checked the same way
+#   disk2rx --enroll --name NAME --server ctl.X.d2g --connect IP --pin 'sha256//…' --token T [--no-service]
+#   disk2rx [--check] [--threads N] [--disk /dev/vda] [--cow-mb N] [--keep-module]   one pass now
+#   disk2rx --poll                    wait for commands from the orchestrator (disk2rx-agent.service)
+# The receiver address is picked from the job: its grey IP, its FIP or the orchestrator (SNI),
+# whichever answers first; the orchestrator can pin one per agent (d2g agent add --path).
 set -euo pipefail
 PREFIX=${PREFIX:-/opt/disk2glance}
 export PATH=$PREFIX/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -19,16 +21,21 @@ VERSION=$(cat "$PREFIX/VERSION" 2>/dev/null || echo dev)
 
 CFG=/etc/disk2glance/d2g.env
 PKIDIR=/etc/disk2glance/d2g
+UNIT=/etc/systemd/system/disk2rx-agent.service
 DISK=/dev/vda
-THREADS=8
+THREADS=
 COW_MB=
 CHECK=0
 ENROLL=0
+POLL=0
+SERVICE=1
 KEEP_MODULE=0
 A_NAME= A_SERVER= A_CONNECT= A_PIN= A_TOKEN= A_PORT=443
 while [ $# -gt 0 ]; do
   case $1 in
     --enroll) ENROLL=1 ;;
+    --poll) POLL=1 ;;
+    --no-service) SERVICE=0 ;;
     --name) A_NAME=$2; shift ;;
     --server) A_SERVER=$2; shift ;;
     --connect) A_CONNECT=$2; shift ;;
@@ -40,22 +47,56 @@ while [ $# -gt 0 ]; do
     --threads) THREADS=$2; shift ;;
     --cow-mb) COW_MB=$2; shift ;;
     --keep-module) KEEP_MODULE=1 ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "unknown option $1" >&2; exit 64 ;;
   esac
   shift
 done
 WORK=/run/disk2rx
 COW=.datto_d2g
+LOG=/var/log/disk2rx.log
 log() { echo "$(date -u +%T) $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
+# the VM's own identity: a copy of this disk (the new VM) carries the agent's certificate, but runs
+# with another instance UUID — it must not act as the source
+host_id() { cat /sys/class/dmi/id/product_uuid 2>/dev/null | tr 'A-Z' 'a-z' || true; }
 [ "$(id -u)" = 0 ] || die "run as root"
 command -v jq >/dev/null || die "jq not found (it ships in the bundle: $PREFIX/bin/jq)"
 mkdir -p "$WORK"; chmod 700 "$WORK"
-exec 9>"$WORK/lock"; flock -n 9 || die "another disk2rx is running"
+
+# req NAME ADDR METHOD PATH OUTFILE [curl args...] -> HTTP code, or 000/curl<rc> on a transport error.
+# TLS goes to NAME (certificate checked against our CA) at ADDR.
+req() {
+  local name=$1 addr=$2 method=$3 path=$4 out=$5 code rc; shift 5
+  code=$(curl -sS --connect-timeout 20 --connect-to "$name:$D2G_PORT:$addr:$D2G_PORT" \
+    --cacert "$PKIDIR/ca.crt" --cert "$PKIDIR/agent.crt" --key "$PKIDIR/agent.key" \
+    -o "$out" -w '%{http_code}' -X "$method" "$@" "https://$name:$D2G_PORT$path"); rc=$?
+  if [ $rc = 0 ]; then printf '%s' "$code"; else printf '000/curl%s' "$rc"; fi
+}
+ctlreq() { req "$D2G_SERVER" "$D2G_CONNECT" "$@"; }   # orchestrator: control
+rxreq() { req "$RX_NAME" "$RX_ADDR" "$@"; }           # receiver: data
+retry() {  # retry WANT ctlreq|rxreq args... -> last code
+  local want=$1 fn=$2 code try; shift 2
+  for try in $(seq 1 8); do
+    code=$($fn "$@")
+    [ "$code" = "$want" ] && { printf '%s' "$code"; return 0; }
+    case $code in 401|403|404|409) break ;; esac
+    log "  $1 $2: HTTP $code (try $try), retrying"
+    sleep $(( try * 5 < 60 ? try * 5 : 60 ))
+  done
+  printf '%s' "$code"
+}
+rxretry() { retry "$1" rxreq "${@:2}"; }
+ctlretry() { retry "$1" ctlreq "${@:2}"; }
+report() {  # report ID COMMAND RC SUMMARY TAIL
+  jq -n --arg id "$1" --arg c "$2" --argjson rc "$3" --arg s "$4" --arg t "$5" \
+    '{id:$id, command:$c, rc:$rc, summary:$s, tail:$t}' >"$WORK/report.json"
+  ctlretry 200 POST /v1/agent/report /dev/null -H 'Content-Type: application/json' --data-binary @"$WORK/report.json" >/dev/null || true
+}
 
 # --- enrollment: one-time token -> client certificate --------------------------------------
 if [ "$ENROLL" = 1 ]; then
+  exec 9>"$WORK/lock"; flock -n 9 || die "another disk2rx is running"
   for v in A_NAME A_SERVER A_CONNECT A_PIN A_TOKEN; do [ -n "${!v}" ] || die "--enroll needs --${v#A_}" ; done
   mkdir -p "$PKIDIR"; chmod 700 "$PKIDIR"
   base=(curl -sS --connect-timeout 30 --connect-to "$A_SERVER:$A_PORT:$A_CONNECT:$A_PORT" --pinnedpubkey "$A_PIN")
@@ -85,44 +126,89 @@ if [ "$ENROLL" = 1 ]; then
   rm -f "$WORK/enroll.json"
   [ "$code" = 200 ] || die "enroll: HTTP $code $(head -c 300 "$WORK/enroll.resp")"
   jq -r .cert "$WORK/enroll.resp" >"$PKIDIR/agent.crt"
-  printf 'D2G_NAME=%s\nD2G_SERVER=%s\nD2G_CONNECT=%s\nD2G_PORT=%s\n' "$A_NAME" "$A_SERVER" "$A_CONNECT" "$A_PORT" >"$CFG"
+  printf 'D2G_NAME=%s\nD2G_SERVER=%s\nD2G_CONNECT=%s\nD2G_PORT=%s\nD2G_HOST_ID=%s\n' "$A_NAME" "$A_SERVER" "$A_CONNECT" "$A_PORT" "$(host_id)" >"$CFG"
   chmod 600 "$CFG"
   log "enrolled as $A_NAME at $A_SERVER ($A_CONNECT): certificate $(openssl x509 -in "$PKIDIR/agent.crt" -noout -enddate)"
+  if [ "$SERVICE" = 1 ] && [ -d /etc/systemd/system ]; then
+    cat >"$UNIT" <<UNITEOF
+[Unit]
+Description=disk2rx agent: waits for commands from the d2g orchestrator $A_SERVER
+After=network-online.target
+Wants=network-online.target
+[Service]
+ExecStart=$PREFIX/bin/disk2rx --poll
+Restart=on-failure
+RestartSec=15
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+    systemctl daemon-reload && systemctl enable -q --now disk2rx-agent.service
+    log "disk2rx-agent.service started: the orchestrator can start passes (d2g job new / d2g agent sync)"
+  fi
   exit 0
 fi
 
+if [ ! -f "$CFG" ] && [ "$POLL" = 1 ]; then
+  log "not enrolled ($CFG not found): disk2rx-agent stays off"; systemctl disable -q disk2rx-agent.service 2>/dev/null || true; exit 0
+fi
 [ -f "$CFG" ] || die "not enrolled: $CFG not found (run disk2rx --enroll ... first)"
 # shellcheck disable=SC1090
 . "$CFG"
 [ -n "$A_CONNECT" ] && D2G_CONNECT=$A_CONNECT
+if [ -n "${D2G_HOST_ID:-}" ] && [ -n "$(host_id)" ] && [ "$(host_id)" != "$D2G_HOST_ID" ]; then
+  # this disk is a copy (the new VM built from the volume): never act as the source
+  mv -f "$CFG" "$CFG.copy-of-$D2G_NAME"; rm -rf "$PKIDIR"
+  systemctl disable -q disk2rx-agent.service 2>/dev/null || true
+  log "this VM ($(host_id)) is a copy of $D2G_NAME ($D2G_HOST_ID): agent identity removed, disk2rx-agent disabled"
+  systemctl stop --no-block disk2rx-agent.service 2>/dev/null || true
+  exit 0
+fi
 export D2G_SERVER D2G_CONNECT D2G_PORT PKIDIR
-log "disk2rx $VERSION, kernel $(uname -r), disk $DISK -> $D2G_SERVER via $D2G_CONNECT:$D2G_PORT, $THREADS threads"
-# rxreq METHOD PATH OUTFILE [curl args...] -> HTTP code, or 000/curl<rc> on a transport error
-rxreq() {
-  local method=$1 path=$2 out=$3 code rc; shift 3
-  code=$(curl -sS --connect-timeout 30 --connect-to "$D2G_SERVER:$D2G_PORT:$D2G_CONNECT:$D2G_PORT" \
-    --cacert "$PKIDIR/ca.crt" --cert "$PKIDIR/agent.crt" --key "$PKIDIR/agent.key" \
-    -o "$out" -w '%{http_code}' -X "$method" "$@" "https://$D2G_SERVER:$D2G_PORT$path"); rc=$?
-  if [ $rc = 0 ]; then printf '%s' "$code"; else printf '000/curl%s' "$rc"; fi
-}
-rxretry() {  # rxretry WANT rxreq-args... -> last code
-  local want=$1 code try; shift
-  for try in $(seq 1 8); do
-    code=$(rxreq "$@")
-    [ "$code" = "$want" ] && { printf '%s' "$code"; return 0; }
-    case $code in 401|403|404|409) break ;; esac
-    log "  $1 $2: HTTP $code (try $try), retrying"
-    sleep $(( try * 5 < 60 ? try * 5 : 60 ))
-  done
-  printf '%s' "$code"
-}
-export -f rxreq
 
-code=$(rxretry 200 GET /v1/agent/job "$WORK/job.json")
-[ "$code" = 200 ] || die "no job from the receiver: HTTP $code $(head -c 300 "$WORK/job.json" 2>/dev/null)"
+# --- poll: commands from the orchestrator ------------------------------------------------------
+if [ "$POLL" = 1 ]; then
+  exec 8>"$WORK/poll.lock"; flock -n 8 || die "another poller is running"
+  log "disk2rx $VERSION: waiting for commands from $D2G_SERVER ($D2G_CONNECT)"
+  while true; do
+    code=$(ctlreq GET /v1/agent/command "$WORK/cmd.json" -m 30)
+    cmd=; [ "$code" = 200 ] && cmd=$(jq -r '.command // empty' "$WORK/cmd.json" 2>/dev/null)
+    if [ -n "$cmd" ]; then
+      cid=$(jq -r .id "$WORK/cmd.json"); thr=$(jq -r '.threads // 8' "$WORK/cmd.json")
+      case $cmd in
+        sync)
+          log "command $cid: pass ($thr threads), log $LOG"
+          echo "===== $(date -u +%FT%TZ) pass by command $cid" >>"$LOG"
+          set +e; D2G_POLLED=1 "$0" --threads "$thr" >>"$LOG" 2>&1 8>&-; rc=$?; set -e
+          summary=$(grep -E 'pass [0-9]+ done|ERROR' "$LOG" | tail -1 | cut -c10-)
+          report "$cid" sync "$rc" "$summary" "$(tail -n 15 "$LOG")"
+          log "command $cid: rc=$rc $summary" ;;
+        uninstall)
+          report "$cid" uninstall 0 "removing the agent" ""
+          log "command $cid: uninstall"
+          systemd-run -q --unit=disk2rx-uninstall --on-active=3 "$PREFIX/install.sh" --uninstall --purge
+          exit 0 ;;
+        *) report "$cid" "$cmd" 64 "unknown command" "" ;;
+      esac
+    fi
+    sleep 15
+  done
+fi
+
+exec 9>"$WORK/lock"; flock -n 9 || die "another disk2rx is running"
+code=$(ctlretry 200 GET /v1/agent/job "$WORK/job.json")
+[ "$code" = 200 ] || die "no job from the orchestrator: HTTP $code $(head -c 300 "$WORK/job.json" 2>/dev/null)"
 JOB=$(jq -r .id "$WORK/job.json"); JOB_BYTES=$(jq -r .disk_bytes "$WORK/job.json")
 PART_BYTES=$(jq -r .part_bytes "$WORK/job.json"); BLOCK_BYTES=$(jq -r .block_bytes "$WORK/job.json"); PASS=$(( $(jq -r .pass_no "$WORK/job.json") + 1 ))
-log "job $JOB: pass $PASS, part $((PART_BYTES / 1048576)) MiB, state $(jq -r .state "$WORK/job.json")"
+THREADS=${THREADS:-$(jq -r '.threads // 8' "$WORK/job.json")}
+RX_NAME=$(jq -r .receiver.name "$WORK/job.json"); RX_ADDR=; RX_PATH=
+# first address of the receiver that answers: grey (Direct Connect / same network), its FIP, the orchestrator
+while read -r kind addr; do
+  [ "$(req "$RX_NAME" "$addr" GET /v1/ping /dev/null -m 10)" = 200 ] && { RX_ADDR=$addr; RX_PATH=$kind; break; }
+  log "  receiver $RX_NAME via $kind $addr: no answer"
+done < <(jq -r '.receiver.addrs[] | "\(.[0]) \(.[1])"' "$WORK/job.json")
+[ -n "$RX_ADDR" ] || die "receiver $RX_NAME is not reachable on any of its addresses"
+export RX_NAME RX_ADDR
+log "disk2rx $VERSION, kernel $(uname -r), disk $DISK: job $JOB pass $PASS -> $RX_NAME via $RX_PATH $RX_ADDR, part $((PART_BYTES / 1048576)) MiB, $THREADS threads"
 
 # --- layout from sysfs (same as disk2glance) -----------------------------------------
 dev=$(basename "$(readlink -f "$DISK")")
@@ -225,11 +311,13 @@ fb_install() {
   for t in "${TARGETS[@]}"; do read -r tdev tmnt <<<"$t"; files="$files ${tmnt%/}/$COW"; done
   cat >"$FB_UNIT" <<UNIT
 [Unit]
-Description=disk2glance: delete dattobd COW files copied with the disk
+Description=disk2glance: delete dattobd COW files and the disk2rx agent identity copied with the disk
 After=local-fs.target
+Before=disk2rx-agent.service
 [Service]
 Type=oneshot
 ExecStart=/bin/sh -c 'for f in$files; do [ -e "\$\$f" ] && { chattr -i "\$\$f" 2>/dev/null; rm -f "\$\$f"; }; done; rm -f $FB_LINK $FB_UNIT'
+ExecStart=/bin/sh -c 'rm -f /etc/systemd/system/multi-user.target.wants/disk2rx-agent.service; [ -f $CFG ] && mv -f $CFG $CFG.copy; rm -rf $PKIDIR; true'
 [Install]
 WantedBy=multi-user.target
 UNIT
@@ -390,7 +478,7 @@ do_part() {
   done
   rm -f "$buf" "$buf.d"; return 1
 }
-export -f emit_range do_part
+export -f emit_range do_part req rxreq
 
 T0=$(date +%s)
 ( exec 9>&-; while sleep 30; do   # fd 9 = lock: a leftover sleep must not hold it
@@ -423,3 +511,5 @@ dt=$((T1 - T0)); [ $dt -gt 0 ] || dt=1
 read -r SENTB DBLK ZBLK SENT < <(cat "$WORK"/parts/*.sent 2>/dev/null | awk '{b += $1; d += $2; z += $3; n++} END {printf "%.0f %d %d %d\n", b, d, z, n}')
 log "pass $PASS done in $dt s: $SENT of $NPARTS parts changed, blocks: $DBLK sent, $ZBLK zero; $(( SENTB / 1048576 )) MiB on the wire ($(( SENTB / 1048576 / dt )) MiB/s), disk read $(( DISK_BYTES / 1048576 / dt )) MiB/s, retries $(cat "$WORK/parts/retries" 2>/dev/null | wc -l), busy $(cat "$WORK/parts/busy" 2>/dev/null | wc -l)"
 log "OK: receiver confirmed all $NPARTS parts, snapshot $T_SNAP"
+# a pass run by hand is reported too (the poller reports its own runs)
+[ -n "${D2G_POLLED:-}" ] || report "" pass 0 "pass $PASS done in $dt s: $SENT parts changed, $(( SENTB / 1048576 )) MiB sent via $RX_PATH" ""

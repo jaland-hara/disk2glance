@@ -1,10 +1,11 @@
 [Unit]
-Description=d2g orchestrator + receiver (HTTPS API)
+Description=d2g receiver (HTTPS :443, writes disk parts into attached volumes)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/d2g/d2g.py serve
+Environment=PYTHONPATH=/opt/d2g
+ExecStart=/usr/bin/python3 -m d2g rx-serve
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65536

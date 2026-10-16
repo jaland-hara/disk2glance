@@ -10,6 +10,20 @@
 репозиториев и вспомогательные ВМ для переноса не нужны. Модуль ядра загружается только на
 время переноса.
 
+## Варианты поставки
+
+| | 1. Только агент на исходной ВМ | 2. Инфраструктура d2g (экспериментально) |
+|---|---|---|
+| Что ставится | бандл `disk2glance-<версия>.tar.gz` на исходную ВМ | ВМ-оркестратор в целевом проекте (`d2g-server-<версия>.tar.gz`); агент на исходную ВМ — одной командой с оркестратора |
+| Куда идёт диск | образ в Glance (`disk2glance`) или объект в S3 (`disk2s3`, том собирает `s3restore`) | сразу в том Cinder через приёмник |
+| Повторные проходы | каждый раз весь диск | дельты: только изменившиеся блоки, по команде или по расписанию |
+| Учётные данные на исходной ВМ | учётка облака (Glance) или ключ S3 | только сертификат агента |
+| Новая ВМ | из образа или тома, командами `openstack` | `d2g job finish` |
+| Инфраструктура в целевом облаке | не нужна | оркестратор (с приёмником на нём же), дополнительные приёмники создаёт сам |
+| Документация | [quickstart.md](docs/quickstart.md), [usage.md](docs/usage.md), [s3-mode.md](docs/s3-mode.md) | [orchestrator.md](docs/orchestrator.md), [receiver-mode.md](docs/receiver-mode.md) |
+
+Снапшоты, модули dattobd, проверки гостевой ОС и ограничения у обоих вариантов общие.
+
 ## Термины
 
 | Термин | Что это |
@@ -24,7 +38,7 @@
 
 **Как начать: [docs/quickstart.md](docs/quickstart.md)** — установка и перенос по шагам.
 
-Коротко: архив из [Releases](https://github.com/jaland-hara/disk2glance/releases) скопировать на исходную ВМ, затем
+Коротко (вариант 1, Glance): архив из [Releases](https://github.com/jaland-hara/disk2glance/releases) скопировать на исходную ВМ, затем
 
 ```bash
 tar xzf disk2glance-0.5.1.tar.gz && cd disk2glance-0.5.1
@@ -42,7 +56,8 @@ sudo disk2glance --detach --name myvm-1   # перенос в фоне, лог: 
 - [docs/guest-drivers.md](docs/guest-drivers.md): драйверы гостевой ОС для KVM/VK Cloud, что проверяет агент, как подготовить ВМ с VMware/Hyper-V.
 - [docs/how-it-works.md](docs/how-it-works.md): что агент делает внутри гостевой ОС, что меняет в системе, нагрузка.
 - [docs/s3-mode.md](docs/s3-mode.md): **экспериментальный перенос через S3** — многопоточная загрузка частями и сборка новой ВМ из S3, замеры и лимиты S3 VK.
-- [docs/receiver-mode.md](docs/receiver-mode.md): **экспериментальный перенос сразу в том** — приёмник `d2g` в целевом облаке, mTLS, части в несколько потоков, докачка и дельты, сборка ВМ из тома.
+- [docs/orchestrator.md](docs/orchestrator.md): **вариант 2, инфраструктура d2g** — оркестратор и приёмники в целевом проекте, установка агента одной командой, перенос сразу в том, дельты, сборка ВМ.
+- [docs/receiver-mode.md](docs/receiver-mode.md): протокол передачи на приёмник, устройство приёмника, замеры.
 - [docs/limitations.md](docs/limitations.md): ограничения, их причины и можно ли их снять.
 - [docs/build-modules.md](docs/build-modules.md): сборка модулей dattobd под новые ядра на сборочной ВМ.
 - [THIRD_PARTY.md](THIRD_PARTY.md): все сторонние компоненты, откуда взяты, как собраны, лицензии.
@@ -53,8 +68,9 @@ sudo disk2glance --detach --name myvm-1   # перенос в фоне, лог: 
 |---|---|
 | `disk2glance.sh` | агент (`/opt/disk2glance/bin/disk2glance`) |
 | `disk2s3.sh` | экспериментальный агент для S3 (`/opt/disk2glance/bin/disk2s3`): multipart в несколько потоков |
-| `disk2rx.sh` | экспериментальный агент для приёмника `d2g` (`/opt/disk2glance/bin/disk2rx`): части по HTTPS (mTLS), докачка, дельты |
-| `server/` | сервер `d2g` (оркестратор + приёмник, Python без зависимостей): CA, регистрация агентов, тома, приём частей, сборка ВМ |
+| `disk2rx.sh` | агент варианта 2 (`/opt/disk2glance/bin/disk2rx`, служба `disk2rx-agent`): части по HTTPS (mTLS) на приёмник, докачка, дельты, команды оркестратора |
+| `server/` | сервер `d2g` (Python, только стандартная библиотека): `d2g/` — оркестратор и приёмник, `install.sh --role orch\|rx`, `unique-boot.sh`, юниты systemd |
+| `make-server-bundle.sh` | сборка `dist/d2g-server-<ver>.tar.gz` (сервер + бандл агента для раздачи) |
 | `s3restore.sh` | сборка тома из S3 на временной ВМ-сборщике в целевом облаке |
 | `install.sh` | установщик и деинсталлятор (офлайн из архива или онлайн по URL) |
 | `make-bundle.sh` | сборка `dist/disk2glance-<ver>.tar.gz` |

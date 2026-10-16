@@ -1,0 +1,13 @@
+[Unit]
+Description=d2g orchestrator API (behind nginx :443)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=PYTHONPATH=/opt/d2g
+ExecStart=/usr/bin/python3 -m d2g serve
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
