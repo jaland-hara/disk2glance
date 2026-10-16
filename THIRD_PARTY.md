@@ -11,7 +11,7 @@
 | `install.sh` | установщик | этот репозиторий | — | проект |
 | `modules/<ядро>/dattobd.ko` | модуль ядра dattobd 0.12.2 (снапшоты блочных устройств с COW) | https://github.com/datto/dattobd, тег `v0.12.2`, коммит `90cde6e468052fadbf4dabe5bd3cafc0a2fe700f` | собран DKMS **под root** на сборочной ВМ того же дистрибутива (см. таблицу ниже), отладочная информация удалена `strip --strip-debug` | GPL-2.0-only |
 | `bin/dbdctl` | утилита управления снапшотами dattobd | тот же тег dattobd (`app/dbdctl.c` + `lib/libdattobd.c`) | собрана **статически** на Ubuntu 24.04: `gcc -O2 -static -I lib -I src app/dbdctl.c lib/libdattobd.a`, gcc 13.3.0, glibc 2.39 | dbdctl — GPL-2.0, libdattobd — LGPL-2.1 |
-| `bin/update-img` | утилита dattobd для инкрементального обновления образа (зарезервирована под режим репликации, сейчас агентом не вызывается) | тот же тег (`utils/update-img.c`) | собрана статически, как `dbdctl` | GPL-2.0 |
+| `bin/update-img` | утилита dattobd для инкрементального обновления образа (агентом не вызывается) | тот же тег (`utils/update-img.c`) | собрана статически, как `dbdctl` | GPL-2.0 |
 | `bin/jq` | jq 1.7.1, разбор JSON (Keystone/Glance API) | https://github.com/jqlang/jq/releases/tag/jq-1.7.1, файл `jq-linux-amd64` | скачан с официального релиза, sha256 сверен с `sha256sum.txt` релиза | MIT |
 | `src/dattobd/` | исходники dattobd того же тега | архив `https://github.com/datto/dattobd/archive/refs/tags/v0.12.2.tar.gz` | без изменений | GPL-2.0 / LGPL-2.1 |
 
