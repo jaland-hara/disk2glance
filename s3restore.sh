@@ -51,7 +51,7 @@ s3req() {
   for p in "$day" "$S3_REGION" s3 aws4_request; do k=$(hmac_hex "$k" "$p"); done
   sig=$(hmac_hex "$k" "$sts")
   local code rc
-  code=$(curl -sS -o "$out" -w '%{http_code}' -X "$method" \
+  code=$(curl -sS --connect-timeout 30 -o "$out" -w '%{http_code}' -X "$method" \
     -H "x-amz-date: $amzdate" -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \
     -H "Authorization: AWS4-HMAC-SHA256 Credential=$S3_ACCESS_KEY/$scope, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=$sig" \
     "$@" "$S3_ENDPOINT$path${query:+?$query}"); rc=$?
@@ -60,8 +60,10 @@ s3req() {
 }
 export -f hmac_hex enc_path enc_val s3req
 
-code=$(s3req GET "$KEYBASE/manifest.json" "" "$WORK/manifest.json")
-[ "$code" = 200 ] || die "manifest: HTTP $code"
+for try in $(seq 1 8); do
+  code=$(s3req GET "$KEYBASE/manifest.json" "" "$WORK/manifest.json"); [ "$code" = 200 ] && break
+  log "manifest: HTTP $code (try $try)"; [ "$try" = 8 ] && die "manifest: HTTP $code"; sleep $((try * 5))
+done
 read -r DISK_BYTES PART_BYTES NPARTS SNAP < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["disk_bytes"], m["part_bytes"], m["parts"], m["snapshot_time"])' "$WORK/manifest.json")
 python3 -c 'import json,sys; [print(i+1, h) for i,h in enumerate(json.load(open(sys.argv[1]))["part_md5"])]' "$WORK/manifest.json" >"$WORK/md5"
 DEV_BYTES=$(blockdev --getsize64 "$DEV")
@@ -74,8 +76,8 @@ get_part() {
   local k=$1 off len buf want got code try
   off=$(( (k - 1) * PART_BYTES )); len=$(( DISK_BYTES - off < PART_BYTES ? DISK_BYTES - off : PART_BYTES ))
   want=$(sed -n "${k}p" "$WORK/md5" | cut -d' ' -f2); buf=$BUF/p$k
-  for try in 1 2 3 4 5 6 7 8; do
-    code=$(s3req GET "$KEY" "" "$buf" -H "Range: bytes=$off-$((off + len - 1))")
+  for try in $(seq 1 12); do
+    code=$(s3req GET "$KEY" "" "$buf" -H "Range: bytes=$off-$((off + len - 1))" --speed-limit 65536 --speed-time 60)
     got=$(md5sum "$buf" 2>/dev/null | cut -d' ' -f1)
     if [ "$code" = 206 ] && [ "$got" = "$want" ]; then
       if cmp -s -n "$len" "$buf" /dev/zero; then echo zero >"$WORK/ok/$k"
@@ -84,7 +86,7 @@ get_part() {
       rm -f "$buf"; return 0
     fi
     echo "$(date -u +%T) part $k try $try: HTTP $code md5 ${got:-none} want $want" >&2
-    echo "$k" >>"$WORK/retries"; sleep $((try * 5))
+    echo "$k" >>"$WORK/retries"; sleep $(( try * 5 < 60 ? try * 5 : 60 ))
   done
   rm -f "$buf"; return 1
 }

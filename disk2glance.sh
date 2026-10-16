@@ -131,23 +131,28 @@ else
 fi
 
 # --- auth: token + Glance endpoint from the catalog ------------------------------
-if [ -n "${OS_APPLICATION_CREDENTIAL_ID:-}" ]; then
-  auth_body=$(jq -n --arg id "$OS_APPLICATION_CREDENTIAL_ID" --arg s "$OS_APPLICATION_CREDENTIAL_SECRET" \
-    '{auth:{identity:{methods:["application_credential"],application_credential:{id:$id,secret:$s}}}}')
-else
-  auth_body=$(jq -n --arg u "$OS_USERNAME" --arg d "${OS_USER_DOMAIN_NAME:-Default}" \
-    --arg p "$OS_PASSWORD" --arg pid "$OS_PROJECT_ID" \
-    '{auth:{identity:{methods:["password"],password:{user:{name:$u,domain:{name:$d},password:$p}}},scope:{project:{id:$pid}}}}')
-fi
-curl -sS --fail -D "$WORK/auth.hdr" -o "$WORK/auth.json" -H 'Content-Type: application/json' \
-  -d "$auth_body" "${OS_AUTH_URL%/}/auth/tokens" || die "Keystone auth failed"
-unset auth_body
-TOKEN=$(awk 'tolower($1)=="x-subject-token:"{print $2}' "$WORK/auth.hdr" | tr -d '\r')
-GLANCE=${GLANCE:-$(jq -r --arg r "${OS_REGION_NAME:-RegionOne}" \
-  '.token.catalog[]|select(.type=="image").endpoints[]|select(.interface=="public" and .region_id==$r).url' "$WORK/auth.json")}
-rm -f "$WORK/auth.hdr" "$WORK/auth.json"
-[ -n "$TOKEN" ] && [ -n "$GLANCE" ] || die "no token or Glance endpoint"
-log "auth OK, Glance $GLANCE"
+# Keystone tokens can be short-lived (1 hour in VK Cloud). Glance checks the token only
+# when the upload starts, so a long upload succeeds, but the calls after it need a new token.
+auth() {
+  if [ -n "${OS_APPLICATION_CREDENTIAL_ID:-}" ]; then
+    auth_body=$(jq -n --arg id "$OS_APPLICATION_CREDENTIAL_ID" --arg s "$OS_APPLICATION_CREDENTIAL_SECRET" \
+      '{auth:{identity:{methods:["application_credential"],application_credential:{id:$id,secret:$s}}}}')
+  else
+    auth_body=$(jq -n --arg u "$OS_USERNAME" --arg d "${OS_USER_DOMAIN_NAME:-Default}" \
+      --arg p "$OS_PASSWORD" --arg pid "$OS_PROJECT_ID" \
+      '{auth:{identity:{methods:["password"],password:{user:{name:$u,domain:{name:$d},password:$p}}},scope:{project:{id:$pid}}}}')
+  fi
+  curl -sS --fail -D "$WORK/auth.hdr" -o "$WORK/auth.json" -H 'Content-Type: application/json' \
+    -d "$auth_body" "${OS_AUTH_URL%/}/auth/tokens" || die "Keystone auth failed"
+  unset auth_body
+  TOKEN=$(awk 'tolower($1)=="x-subject-token:"{print $2}' "$WORK/auth.hdr" | tr -d '\r')
+  GLANCE=${GLANCE:-$(jq -r --arg r "${OS_REGION_NAME:-RegionOne}" \
+    '.token.catalog[]|select(.type=="image").endpoints[]|select(.interface=="public" and .region_id==$r).url' "$WORK/auth.json")}
+  rm -f "$WORK/auth.hdr" "$WORK/auth.json"
+  [ -n "$TOKEN" ] && [ -n "$GLANCE" ] || die "no token or Glance endpoint"
+  log "auth OK, Glance $GLANCE"
+}
+auth
 
 # --- layout from sysfs (works without sfdisk --json, e.g. CentOS 7) ---------------
 dev=$(basename "$(readlink -f "$DISK")")
@@ -274,6 +279,17 @@ guest_checks() {
   fi
   command -v cloud-init >/dev/null \
     || { log "  WARN: cloud-init not installed: network config bound to the old interface name/MAC may not come up on the new VM"; warn=1; }
+  # network config pinned to this VM's NIC name or MAC, with cloud-init not allowed to rewrite it:
+  # the new VM's NIC gets another name (enp3s0 -> enp1s0, eth0) and stays down, no SSH
+  local cinet=on pinned= nic
+  grep -rqsE '^[^#]*network:.*config:[[:space:]]*disabled|^[[:space:]]*config:[[:space:]]*disabled' /etc/cloud/cloud.cfg /etc/cloud/cloud.cfg.d/ && cinet=off
+  if [ "$cinet" = off ]; then
+    for nic in $(ls /sys/class/net | grep -vE '^(lo|docker|br-|veth|virbr|tun|tap|wg|tailscale)'); do
+      grep -rqsE "(^|[[:space:]])$nic:|name:[[:space:]]*\"?$nic\"?|macaddress" /etc/netplan/ /etc/network/interfaces /etc/network/interfaces.d/ 2>/dev/null && pinned="$pinned $nic"
+      ls /etc/sysconfig/network-scripts/ifcfg-$nic >/dev/null 2>&1 && pinned="$pinned $nic"
+    done
+    [ -n "$pinned" ] && { log "  WARN: cloud-init network config is disabled and the network config names this VM's NIC(s):$pinned — on the new VM the NIC name differs and the network stays down (docs/guest-drivers.md)"; warn=1; }
+  fi
   if [ -f "$PROPS" ] && [ "$(jq -r '.hw_qemu_guest_agent // empty' "$PROPS")" = yes ] && ! command -v qemu-ga >/dev/null; then
     log "  WARN: props.json sets hw_qemu_guest_agent=yes but qemu-guest-agent is not installed"; warn=1
   fi
@@ -321,6 +337,7 @@ cleanup() {
   done
   MINORS=()
   fb_remove
+  discard_restore
   if [ "$LOADED_BY_US" = 1 ] && [ "$KEEP_MODULE" = 0 ] && [ -e /proc/datto-info ]; then
     rmmod dattobd 2>/dev/null && LOADED_BY_US=0 || log "WARN: rmmod dattobd failed"
   fi
@@ -351,6 +368,32 @@ UNIT
 }
 fb_remove() { rm -f "$FB_LINK" "$FB_UNIT"; }
 
+# --- discard (TRIM) while the snapshot exists -------------------------------------------
+# dattobd does not copy blocks before a discard request (tracer_should_trace_bio skips them).
+# On a disk that really zeroes discarded blocks (Yandex Cloud does; Ceph RBD in VK ignores
+# small ones), a file deleted after the snapshot would read back as zeros in the copy. So:
+# filesystems mounted with 'discard' are remounted 'nodiscard' and fstrim.timer is paused
+# until the snapshots are gone.
+NODISCARD=()
+FSTRIM_STOPPED=0
+discard_off() {
+  local t tdev tmnt
+  if systemctl is-active -q fstrim.service 2>/dev/null; then die "fstrim is running right now — wait for it to finish and start again"; fi
+  if systemctl is-active -q fstrim.timer 2>/dev/null; then systemctl stop fstrim.timer && FSTRIM_STOPPED=1 && log "fstrim.timer paused"; fi
+  for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
+    read -r tdev tmnt <<<"$t"
+    findmnt -no OPTIONS "$tmnt" | tr ',' '\n' | grep -qx discard || continue
+    mount -o remount,nodiscard "$tmnt" || die "$tmnt is mounted with 'discard' and cannot be remounted 'nodiscard' — remount it by hand and start again"
+    NODISCARD+=("$tmnt"); log "$tmnt: remounted nodiscard for the transfer"
+  done
+}
+discard_restore() {
+  local m
+  for m in ${NODISCARD[@]+"${NODISCARD[@]}"}; do mount -o remount,discard "$m" && log "$m: discard restored" || log "WARN: could not restore 'discard' on $m — run: mount -o remount,discard $m"; done
+  NODISCARD=()
+  if [ "$FSTRIM_STOPPED" = 1 ]; then systemctl start fstrim.timer && log "fstrim.timer resumed"; FSTRIM_STOPPED=0; fi
+}
+
 trap cleanup EXIT
 trap 'log "signal received, cleaning up"; exit 130' INT TERM HUP
 
@@ -359,6 +402,7 @@ next_minor() { local m=0; while [ -e "/dev/datto$m" ]; do m=$((m+1)); done; echo
 # Flush dirty data first: dattobd freezes the filesystem while it sets up the snapshot,
 # and on a busy disk the freeze-time flush is what stalls application writes (measured:
 # 17-26 s without, ~11 s with sync, ~6 s with sync + 256 MiB COW on a loaded ceph-hdd).
+discard_off
 fb_install
 t0=$(date +%s); sync; log "sync before snapshots: $(( $(date +%s) - t0 )) s"
 COWOPT=(); [ -n "$COW_MB" ] && COWOPT=(-f "$COW_MB")
@@ -425,6 +469,7 @@ sleep 3   # let the hash process substitutions finish
 
 cleanup
 
+auth   # new token: the one from the start may have expired during a long upload
 meta=$(curl -sS --fail -H "X-Auth-Token: $TOKEN" "${GLANCE%/}/v2/images/$IMG")
 status=$(jq -r .status <<<"$meta"); size=$(jq -r .size <<<"$meta")
 # Glance with multihash fills os_hash_value (sha512); VK Glance only fills md5 "checksum"

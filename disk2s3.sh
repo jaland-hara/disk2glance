@@ -90,7 +90,7 @@ s3req() {
   for p in "$day" "$S3_REGION" s3 aws4_request; do k=$(hmac_hex "$k" "$p"); done
   sig=$(hmac_hex "$k" "$sts")
   local code rc
-  code=$(curl -sS -o "$out" -w '%{http_code}' -X "$method" \
+  code=$(curl -sS --connect-timeout 30 -o "$out" -w '%{http_code}' -X "$method" \
     -H "x-amz-date: $amzdate" -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \
     -H "Authorization: AWS4-HMAC-SHA256 Credential=$S3_ACCESS_KEY/$scope, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=$sig" \
     "$@" "$S3_ENDPOINT$path${query:+?$query}"); rc=$?
@@ -98,6 +98,18 @@ s3req() {
   if [ $rc = 0 ]; then printf '%s' "$code"; else printf '000/curl%s' "$rc"; fi
 }
 export -f hmac_hex enc_path enc_val s3req
+# control requests (create, complete, head, manifest) are retried too: VK S3 sometimes hangs
+# for minutes on the TLS handshake. Usage: s3retry WANT_CODE s3req-args... -> last code
+s3retry() {
+  local want=$1 code try; shift
+  for try in $(seq 1 8); do
+    code=$(s3req "$@")
+    [ "$code" = "$want" ] && { printf '%s' "$code"; return 0; }
+    log "  S3 $1 ${2##*/}: HTTP $code (try $try), retrying"
+    sleep $(( try * 5 < 60 ? try * 5 : 60 ))
+  done
+  printf '%s' "$code"
+}
 
 code=$(s3req GET "" "list-type=2&max-keys=1&prefix=$(enc_val "$KEYPREFIX")" "$WORK/s3check.xml")
 [ "$code" = 200 ] || die "S3 bucket $S3_BUCKET not accessible: HTTP $code $(head -c 300 "$WORK/s3check.xml")"
@@ -183,6 +195,7 @@ cleanup() {
   done
   MINORS=()
   fb_remove
+  discard_restore
   if [ "$LOADED_BY_US" = 1 ] && [ "$KEEP_MODULE" = 0 ] && [ -e /proc/datto-info ]; then rmmod dattobd 2>/dev/null || log "WARN: rmmod dattobd failed"; LOADED_BY_US=0; fi
   if [ -n "$UPLOAD_ID" ]; then
     log "aborting multipart upload $UPLOAD_ID"
@@ -215,10 +228,37 @@ UNIT
 }
 fb_remove() { rm -f "$FB_LINK" "$FB_UNIT"; }
 
+# --- discard (TRIM) while the snapshot exists -------------------------------------------
+# dattobd does not copy blocks before a discard request (tracer_should_trace_bio skips them).
+# On a disk that really zeroes discarded blocks (Yandex Cloud does; Ceph RBD in VK ignores
+# small ones), a file deleted after the snapshot would read back as zeros in the copy. So:
+# filesystems mounted with 'discard' are remounted 'nodiscard' and fstrim.timer is paused
+# until the snapshots are gone.
+NODISCARD=()
+FSTRIM_STOPPED=0
+discard_off() {
+  local t tdev tmnt
+  if systemctl is-active -q fstrim.service 2>/dev/null; then die "fstrim is running right now — wait for it to finish and start again"; fi
+  if systemctl is-active -q fstrim.timer 2>/dev/null; then systemctl stop fstrim.timer && FSTRIM_STOPPED=1 && log "fstrim.timer paused"; fi
+  for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
+    read -r tdev tmnt <<<"$t"
+    findmnt -no OPTIONS "$tmnt" | tr ',' '\n' | grep -qx discard || continue
+    mount -o remount,nodiscard "$tmnt" || die "$tmnt is mounted with 'discard' and cannot be remounted 'nodiscard' — remount it by hand and start again"
+    NODISCARD+=("$tmnt"); log "$tmnt: remounted nodiscard for the transfer"
+  done
+}
+discard_restore() {
+  local m
+  for m in ${NODISCARD[@]+"${NODISCARD[@]}"}; do mount -o remount,discard "$m" && log "$m: discard restored" || log "WARN: could not restore 'discard' on $m — run: mount -o remount,discard $m"; done
+  NODISCARD=()
+  if [ "$FSTRIM_STOPPED" = 1 ]; then systemctl start fstrim.timer && log "fstrim.timer resumed"; FSTRIM_STOPPED=0; fi
+}
+
 trap cleanup EXIT
 trap 'log "signal received, cleaning up"; exit 130' INT TERM HUP
 next_minor() { local m=0; while [ -e "/dev/datto$m" ]; do m=$((m+1)); done; echo $m; }
 
+discard_off
 fb_install
 t0=$(date +%s); sync; log "sync before snapshots: $(( $(date +%s) - t0 )) s"
 COWOPT=(); [ -n "$COW_MB" ] && COWOPT=(-f "$COW_MB")
@@ -245,7 +285,7 @@ SEG=$WORK/segments
 log "segments: $(wc -l <"$SEG")"
 
 # --- multipart upload --------------------------------------------------------------------
-code=$(s3req POST "$KEY" "uploads=" "$WORK/init.xml" -H "Content-Type: application/octet-stream")
+code=$(s3retry 200 POST "$KEY" "uploads=" "$WORK/init.xml" -H "Content-Type: application/octet-stream")
 [ "$code" = 200 ] || die "CreateMultipartUpload: HTTP $code $(head -c 300 "$WORK/init.xml")"
 UPLOAD_ID=$(sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p' "$WORK/init.xml")
 [ -n "$UPLOAD_ID" ] || die "no UploadId in $(cat "$WORK/init.xml")"
@@ -272,9 +312,11 @@ do_part() {
   [ "$(stat -c %s "$buf")" = "$len" ] || { echo "part $k: short read" >&2; return 1; }
   md5b=$(openssl dgst -md5 -binary "$buf" | base64)
   md5h=$(printf '%s' "$md5b" | base64 -d | od -An -tx1 | tr -d ' \n')
-  for try in 1 2 3 4 5 6 7 8; do
+  for try in $(seq 1 12); do
+    # a stalled transfer (< 64 KiB/s for 60 s) is dropped and retried instead of hanging for minutes
     code=$(s3req PUT "$KEY" "partNumber=$k&uploadId=$(enc_val "$UPLOAD_ID")" "$WORK/parts/$k.resp" \
-      -D "$WORK/parts/$k.hdr" -H "Content-MD5: $md5b" -H "Content-Type: application/octet-stream" -T "$buf")
+      -D "$WORK/parts/$k.hdr" -H "Content-MD5: $md5b" -H "Content-Type: application/octet-stream" \
+      --speed-limit 65536 --speed-time 60 -T "$buf")
     if [ "$code" = 200 ]; then
       etag=$(awk 'tolower($1)=="etag:"{print $2}' "$WORK/parts/$k.hdr" | tr -d '\r"')
       echo "$etag $md5h" >"$WORK/parts/$k.ok"; rm -f "$buf" "$WORK/parts/$k.resp" "$WORK/parts/$k.hdr"
@@ -282,7 +324,7 @@ do_part() {
     fi
     echo "$(date -u +%T) part $k try $try: HTTP $code $(head -c 200 "$WORK/parts/$k.resp" 2>/dev/null)" >&2
     echo "$try" >>"$WORK/parts/retries"
-    sleep $((try * 5))
+    sleep $(( try * 5 < 60 ? try * 5 : 60 ))
   done
   rm -f "$buf"; return 1
 }
@@ -302,12 +344,20 @@ T1=$(date +%s); kill "$PPID_MON" 2>/dev/null || true; PPID_MON=
 { echo "<CompleteMultipartUpload>"
   for k in $(seq 1 "$NPARTS"); do read -r etag md5h <"$WORK/parts/$k.ok"; echo "<Part><PartNumber>$k</PartNumber><ETag>\"$etag\"</ETag></Part>"; done
   echo "</CompleteMultipartUpload>"; } >"$WORK/complete.xml"
-code=$(s3req POST "$KEY" "uploadId=$(enc_val "$UPLOAD_ID")" "$WORK/complete.resp" -H "Content-Type: application/xml" --data-binary @"$WORK/complete.xml")
-{ [ "$code" = 200 ] && ! grep -q '<Error>' "$WORK/complete.resp"; } || die "CompleteMultipartUpload: HTTP $code $(head -c 300 "$WORK/complete.resp")"
+# completing can take minutes on the S3 side and the reply can be lost: retry, and if S3 says
+# NoSuchUpload, the object may already be assembled — the size/ETag check below decides
+for try in $(seq 1 8); do
+  code=$(s3req POST "$KEY" "uploadId=$(enc_val "$UPLOAD_ID")" "$WORK/complete.resp" -H "Content-Type: application/xml" --data-binary @"$WORK/complete.xml")
+  { [ "$code" = 200 ] && ! grep -q '<Error>' "$WORK/complete.resp"; } && break
+  if [ "$try" -gt 1 ] && grep -q NoSuchUpload "$WORK/complete.resp" 2>/dev/null; then log "  complete: NoSuchUpload after a retry — checking the object"; break; fi
+  log "  CompleteMultipartUpload: HTTP $code (try $try) $(head -c 200 "$WORK/complete.resp" 2>/dev/null)"
+  [ "$try" = 8 ] && die "CompleteMultipartUpload failed"
+  sleep $(( try * 10 < 60 ? try * 10 : 60 ))
+done
 UPLOAD_ID=
 # expected multipart ETag: md5 of the concatenated binary part MD5s, "-<parts>"
 exp_etag="$(printf '%b' "$(for k in $(seq 1 "$NPARTS"); do cut -d' ' -f2 "$WORK/parts/$k.ok"; done | tr -d '\n' | sed 's/../\\x&/g')" | md5sum | cut -d' ' -f1)-$NPARTS"
-s3req HEAD "$KEY" "" /dev/null -I -D "$WORK/head.hdr" >/dev/null
+s3retry 200 HEAD "$KEY" "" /dev/null -I -D "$WORK/head.hdr" >/dev/null
 size=$(awk 'tolower($1)=="content-length:"{print $2}' "$WORK/head.hdr" | tr -d '\r')
 etag=$(awk 'tolower($1)=="etag:"{print $2}' "$WORK/head.hdr" | tr -d '\r"')
 dt=$((T1 - T0)); [ $dt -gt 0 ] || dt=1
@@ -320,6 +370,6 @@ log "OK: size and multipart ETag match"
     "$NAME" "$DISK_BYTES" "$PART_BYTES" "$NPARTS" "$T_SNAP" "$(hostname -s)" "$VERSION" "$etag"
   for k in $(seq 1 "$NPARTS"); do [ "$k" -gt 1 ] && printf ','; printf '"%s"' "$(cut -d' ' -f2 "$WORK/parts/$k.ok")"; done
   printf ']}\n'; } >"$WORK/manifest.json"
-code=$(s3req PUT "${KEYPREFIX}${NAME}/manifest.json" "" /dev/null -H "Content-Type: application/json" -T "$WORK/manifest.json")
+code=$(s3retry 200 PUT "${KEYPREFIX}${NAME}/manifest.json" "" /dev/null -H "Content-Type: application/json" -T "$WORK/manifest.json")
 [ "$code" = 200 ] || log "WARN: manifest upload HTTP $code"
 echo "s3://$S3_BUCKET/$KEY"

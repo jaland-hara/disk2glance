@@ -27,7 +27,7 @@
 Коротко: архив из [Releases](https://github.com/jaland-hara/disk2glance/releases) скопировать на исходную ВМ, затем
 
 ```bash
-tar xzf disk2glance-0.5.0.tar.gz && cd disk2glance-0.5.0
+tar xzf disk2glance-0.5.1.tar.gz && cd disk2glance-0.5.1
 sudo ./install.sh                         # создаст /etc/disk2glance/{openrc,props.json,disk2glance.conf}
 sudo vi /etc/disk2glance/openrc           # вписать учётные данные целевого облака
 sudo disk2glance --check                  # проверка без переноса
@@ -82,6 +82,8 @@ ceph-hdd). На каждой работала нагрузка: PostgreSQL с pg
 | **CentOS 7.9, корень на LVM** (`/boot` xfs, `centos-root` xfs, `centos-swap`) | 3.10.0-1160.119.1.el7 | из бандла (собран на сборочной ВМ CentOS 7) | 480 с, 42 МиБ/с (pgbench без ограничения скорости) | ✅ LVM и XFS подняты, PostgreSQL 9.2 |
 | Astra Linux SE 1.7.5 (1.7.5.9) | 6.1.50-1-generic | собран на самой исходной ВМ | 316 с, 64 МиБ/с (одновременно с 1.8.6) | ✅ PostgreSQL 11 |
 | Astra Linux SE 1.8.6 (1.8.6.39, обновлена с 1.8.5) | 6.1.166-1-generic | собран на самой исходной ВМ | 462 с, 44 МиБ/с (одновременно с 1.7.5) | ✅ PostgreSQL 15 |
+| **Ubuntu 24.04 в Яндекс Облаке** (ФС с `discard`) | 6.8.0-146-generic | из бандла (собран на сборочной ВМ) | 704 с, 14 МиБ/с (упор в чтение диска 10 ГБ); S3: 722 с | ✅ из Glance и из S3 |
+| **Ubuntu 22.04 в Cloud.ru** (VPN-шлюз, работал во время переноса) | 5.15.0-181-generic | собран на самой исходной ВМ (`install.sh --build`) | 87 мин, 6 МиБ/с (канал ВМ) | ✅ после правки сети (см. [guest-drivers.md](docs/guest-drivers.md#3-сеть)) |
 
 **S3-режим (0.5, экспериментальный).** Ubuntu 24.04, диск 300 ГБ ceph-ssd с 250 ГБ данных:
 загрузка в S3 за 17,5 мин (291 МиБ/с, 24 потока), сборка тома из S3 за 19 мин (272 МиБ/с),

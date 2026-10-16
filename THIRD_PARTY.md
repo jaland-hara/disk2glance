@@ -30,11 +30,13 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 У каждого модуля рядом лежит `dattobd.ko.sha256`. `install.sh` проверяет его и сверяет
 `vermagic` модуля с `uname -r`.
 
-### Готовые модули (бандл 0.4.2)
+### Готовые модули (бандл 0.5.1)
 
 | Ядро | Дистрибутив | Где собран | Пакеты для сборки (из репозиториев дистрибутива) |
 |---|---|---|---|
 | `6.8.0-134-generic` | Ubuntu 24.04 | на тестовой ВМ, где запущено это ядро | `build-essential`, `dkms`, `linux-headers-6.8.0-134-generic` — archive.ubuntu.com |
+| `6.8.0-146-generic` | Ubuntu 24.04 | на сборочной ВМ Ubuntu 24.04, где это ядро не запущено (`build-module.sh`, кросс-сборка) | `build-essential`, `libelf-dev`, `git`, `linux-headers-6.8.0-146-generic` (+ `System.map` из `linux-modules-6.8.0-146-generic`) — archive.ubuntu.com |
+| `5.15.0-181-generic` | Ubuntu 22.04 | на исходной ВМ, где запущено это ядро (`install.sh --build`, без dkms) | `gcc`, `make`, `linux-headers-5.15.0-181-generic` (уже были на ВМ) — archive.ubuntu.com |
 | `6.12.21-1.red80.x86_64` | RED OS 8 | на тестовой ВМ, где запущено это ядро | `gcc`, `make`, `dkms`, `elfutils-libelf-devel`, `kernel-lt-devel-6.12.21-1.red80` — репозитории RED OS (`base`, `updates`) |
 | `6.12.92-1.red80.x86_64` | RED OS 8 | на сборочной ВМ RED OS 8, работающей на другом ядре (кросс-сборка) | то же + `kernel-lt-devel-6.12.92-1.red80` |
 | `6.12.101-1.red80.x86_64` | RED OS 8 | на сборочной ВМ RED OS 8, где это ядро даже не установлено (кросс-сборка) | то же + `kernel-lt-devel-6.12.101-1.red80` |

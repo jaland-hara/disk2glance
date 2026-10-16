@@ -25,6 +25,7 @@
 | если `virtio_blk` собран модулем, он есть в initramfs | иначе при загрузке не найдётся корневая ФС (`dracut: Could not boot`, `ALERT! UUID=... does not exist`) | `virtio_blk is a module but missing from <initramfs>` |
 | в `/etc/fstab` нет `/dev/sdX`, `/dev/xvdX`, `/dev/hdX` | на KVM диски называются `/dev/vdX`, монтирование по старым именам сломается | `/etc/fstab uses /dev/sdX-style names` |
 | установлен cloud-init | настраивает сеть на новой ВМ; без него настройки, привязанные к старому имени интерфейса или MAC, не заработают | `cloud-init not installed` |
+| сеть cloud-init не отключена, либо конфигурация сети не привязана к имени/MAC интерфейса | если в `/etc/cloud/cloud.cfg.d/` стоит `network: {config: disabled}`, а netplan/ifcfg называет интерфейс по имени (`enp3s0`) или MAC, на новой ВМ интерфейс будет называться иначе и останется без сети и SSH | `cloud-init network config is disabled and the network config names this VM's NIC(s)` |
 | `qemu-guest-agent` установлен, если в `props.json` указано `hw_qemu_guest_agent=yes` | облако будет ожидать гостевой агент | `... qemu-guest-agent is not installed` |
 
 Предупреждения не останавливают перенос, но итог проверки будет
@@ -79,6 +80,26 @@ VMware) и получит другой MAC. Варианты:
   `/etc/cloud/cloud.cfg.d/90-datasource.cfg`;
 - или заранее добавить конфигурацию DHCP для любого интерфейса (например, в netplan
   `match: {name: "e*"}`), не привязанную к имени и MAC.
+
+Так бывает у ВМ из облаков, где провайдер отключает сеть cloud-init и пишет свой netplan
+(пример: ВМ из Cloud.ru с `99-disable-network-config.cfg` и `01-netconfig.yaml` для `enp3s0`;
+в VK интерфейс стал `enp1s0`). Безопасный вариант: до переноса добавить на исходной ВМ файл,
+который ничего не меняет там, но поднимет сеть на новой ВМ:
+
+```yaml
+# /etc/netplan/02-any-nic.yaml (права 600)
+network:
+  version: 2
+  ethernets:
+    any-en:
+      match:
+        name: "en*"
+      dhcp4: true
+```
+
+Если клон уже создан без него: отключить том от новой ВМ, подключить к любой ВМ в том же
+облаке, смонтировать корневой раздел, положить этот файл в `etc/netplan/`, вернуть том и
+создать ВМ с него заново.
 
 ### 4. Гостевой агент
 
