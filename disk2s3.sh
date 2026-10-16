@@ -331,7 +331,7 @@ do_part() {
 export -f emit_range do_part
 
 T0=$(date +%s)
-( while sleep 30; do
+( exec 9>&-; while sleep 30; do   # fd 9 = lock: a leftover sleep must not hold it
     n=$(ls "$WORK/parts" | grep -c '\.ok$' || true); dt=$(( $(date +%s) - T0 ))
     log "progress: $n/$NPARTS parts, $(( n * PART_BYTES / 1048576 / (dt > 0 ? dt : 1) )) MiB/s avg, retries $(cat "$WORK/parts/retries" 2>/dev/null | wc -l)"
   done ) & PPID_MON=$!

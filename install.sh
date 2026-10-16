@@ -42,8 +42,8 @@ if [ "$UNINSTALL" = 1 ]; then
   fi
   # (no 'semanage -l | grep -q' test: with pipefail grep's early exit makes it false)
   command -v semanage >/dev/null && semanage fcontext -d "$PREFIX/modules(/.*)?" 2>/dev/null || true
-  rm -rf "$PREFIX" /usr/local/sbin/disk2glance /usr/local/sbin/disk2s3 /run/disk2glance /run/disk2s3 /var/log/disk2glance.log /var/log/disk2s3.log
-  for c in disk2glance disk2s3; do [ "$(readlink /usr/sbin/$c 2>/dev/null)" = "$PREFIX/bin/$c" ] && rm -f /usr/sbin/$c; done
+  rm -rf "$PREFIX" /usr/local/sbin/disk2glance /usr/local/sbin/disk2s3 /usr/local/sbin/disk2rx /run/disk2glance /run/disk2s3 /run/disk2rx /var/log/disk2glance.log /var/log/disk2s3.log /var/log/disk2rx.log
+  for c in disk2glance disk2s3 disk2rx; do [ "$(readlink /usr/sbin/$c 2>/dev/null)" = "$PREFIX/bin/$c" ] && rm -f /usr/sbin/$c; done
   # leftovers of a run killed with -9: COW file and the first-boot unit meant for the copy
   rm -f /.datto_d2g /boot/.datto_d2g /etc/systemd/system/disk2glance-cowclean.service \
     /etc/systemd/system/multi-user.target.wants/disk2glance-cowclean.service
@@ -117,6 +117,7 @@ fi
 install -d -m755 "$PREFIX" "$PREFIX/bin" "$PREFIX/modules/$KVER"
 install -m755 "$B/disk2glance.sh" "$PREFIX/bin/disk2glance"
 [ -f "$B/disk2s3.sh" ] && install -m755 "$B/disk2s3.sh" "$PREFIX/bin/disk2s3"   # experimental S3 mode
+[ -f "$B/disk2rx.sh" ] && install -m755 "$B/disk2rx.sh" "$PREFIX/bin/disk2rx"   # experimental: to a d2g receiver
 install -m755 "$B/bin/dbdctl" "$B/bin/update-img" "$B/bin/jq" "$PREFIX/bin/"
 install -m644 "$KO_SRC" "$(dirname "$KO_SRC")/dattobd.ko.sha256" "$PREFIX/modules/$KVER/"
 install -m644 "$B/VERSION" "$PREFIX/VERSION"
@@ -133,7 +134,7 @@ if command -v selinuxenabled >/dev/null && selinuxenabled; then
   fi
   log "SELinux: $PREFIX/modules labelled modules_object_t"
 fi
-for c in disk2glance disk2s3; do
+for c in disk2glance disk2s3 disk2rx; do
   [ -f "$PREFIX/bin/$c" ] || continue
   ln -sf "$PREFIX/bin/$c" /usr/local/sbin/$c
   # sudo secure_path on RHEL-likes has no /usr/local/sbin

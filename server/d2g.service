@@ -1,0 +1,13 @@
+[Unit]
+Description=d2g orchestrator + receiver (HTTPS API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/d2g/d2g.py serve
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

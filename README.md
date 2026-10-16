@@ -42,6 +42,7 @@ sudo disk2glance --detach --name myvm-1   # перенос в фоне, лог: 
 - [docs/guest-drivers.md](docs/guest-drivers.md): драйверы гостевой ОС для KVM/VK Cloud, что проверяет агент, как подготовить ВМ с VMware/Hyper-V.
 - [docs/how-it-works.md](docs/how-it-works.md): что агент делает внутри гостевой ОС, что меняет в системе, нагрузка.
 - [docs/s3-mode.md](docs/s3-mode.md): **экспериментальный перенос через S3** — многопоточная загрузка частями и сборка новой ВМ из S3, замеры и лимиты S3 VK.
+- [docs/receiver-mode.md](docs/receiver-mode.md): **экспериментальный перенос сразу в том** — приёмник `d2g` в целевом облаке, mTLS, части в несколько потоков, докачка и дельты, сборка ВМ из тома.
 - [docs/limitations.md](docs/limitations.md): ограничения, их причины и можно ли их снять.
 - [docs/build-modules.md](docs/build-modules.md): сборка модулей dattobd под новые ядра на сборочной ВМ.
 - [THIRD_PARTY.md](THIRD_PARTY.md): все сторонние компоненты, откуда взяты, как собраны, лицензии.
@@ -52,6 +53,8 @@ sudo disk2glance --detach --name myvm-1   # перенос в фоне, лог: 
 |---|---|
 | `disk2glance.sh` | агент (`/opt/disk2glance/bin/disk2glance`) |
 | `disk2s3.sh` | экспериментальный агент для S3 (`/opt/disk2glance/bin/disk2s3`): multipart в несколько потоков |
+| `disk2rx.sh` | экспериментальный агент для приёмника `d2g` (`/opt/disk2glance/bin/disk2rx`): части по HTTPS (mTLS), докачка, дельты |
+| `server/` | сервер `d2g` (оркестратор + приёмник, Python без зависимостей): CA, регистрация агентов, тома, приём частей, сборка ВМ |
 | `s3restore.sh` | сборка тома из S3 на временной ВМ-сборщике в целевом облаке |
 | `install.sh` | установщик и деинсталлятор (офлайн из архива или онлайн по URL) |
 | `make-bundle.sh` | сборка `dist/disk2glance-<ver>.tar.gz` |

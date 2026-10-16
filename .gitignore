@@ -3,3 +3,4 @@ dist/
 openrc
 *.env
 env*.sh
+__pycache__/
