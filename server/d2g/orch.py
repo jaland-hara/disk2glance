@@ -50,11 +50,18 @@ def conf():
 
 
 def db_init():
+    from . import ui
     db.init()
+    db().executescript(ui.SCHEMA)
     try:   # databases made before the local receiver existed
         db().execute("ALTER TABLE receivers ADD COLUMN local INTEGER DEFAULT 0")
     except Exception:  # noqa: BLE001
         pass
+
+
+def actor():
+    """who is acting: 'admin' (CLI) or 'ui:<name>' (the web interface runs the CLI)."""
+    return os.environ.get("D2G_ACTOR", "admin")
 
 
 def event(who, what):
@@ -111,6 +118,9 @@ class OrchHandler(C.Handler):
 
     def route(self, method, p):
         c = self.server.conf
+        if getattr(self.connection, "d2g_ui", False):
+            from . import ui
+            return ui.handle(self, method, p)
         if p == ["v1", "ping"]:
             return self.reply(200, {"orchestrator": c["ctl_name"]})
         if p == ["v1", "ca"]:
@@ -275,10 +285,21 @@ rm -rf "$d"
 
 
 def cmd_serve(a):
+    import ssl
     c = conf()
     db_init()
+    db().execute("UPDATE tasks SET state='interrupted', finished=? WHERE state='running'", (now(),))
     srv = C.Server(("127.0.0.1", c["api_port"]), OrchHandler)
     srv.ctx = C.server_ctx(f"{PKI}/ctl.crt", f"{PKI}/ctl.key", f"{PKI}/ca.crt")
+    # browsers come by IP (no SNI) or any other name: they get the UI and its own certificate
+    ui_ctx = C.server_ctx(f"{PKI}/ui.crt", f"{PKI}/ui.key", f"{PKI}/ca.crt")
+    ui_ctx.verify_mode = ssl.CERT_OPTIONAL if c.get("ui_mtls") else ssl.CERT_NONE
+
+    def sni(sock, name, _ctx):
+        if name != c["ctl_name"]:
+            sock.context = ui_ctx
+            sock.d2g_ui = True
+    srv.ctx.sni_callback = sni
     srv.conf = c
     log(f"orchestrator {c['ctl_name']} on 127.0.0.1:{c['api_port']} (behind nginx :443), project {c.get('project', '?')}")
     C.serve(srv, a.workers or 2, in_parent=scheduler)
@@ -330,6 +351,12 @@ def cmd_setup(a):
     c.setdefault("max_volumes", 20)
     c.setdefault("part_mb", 64)
     c.setdefault("vm_sg", ["default"])
+    if a.ui_allow:
+        c["ui_allow"] = sorted(set(c.get("ui_allow", []) + a.ui_allow))
+    c.setdefault("ui_allow", [])
+    if a.ui_mtls:
+        c["ui_mtls"] = a.ui_mtls == "on"
+    c.setdefault("ui_mtls", False)
     C.ca_init(PKI, f"d2g CA {c['domain']}")
     if not os.path.exists(f"{PKI}/ctl.crt"):
         csr = C.new_key_csr(f"{PKI}/ctl.key", c["ctl_name"])
@@ -348,6 +375,12 @@ def cmd_setup(a):
     print(f"receivers: {c['rx_flavor']}, image {c.get('rx_image')}, {c['rx_volume_gb']} GB {c['rx_volume_type']}, "
           f"SG {RX_SG} (443 from {c['grey_ip']} {' '.join(c['allow'])}), FIP pool {c['fip_pool'] or '-'}")
     print(f"pin of {c['ctl_name']}: {C.pubkey_pin(PKI + '/ctl.crt')}")
+    from . import ui
+    fp = ui.ui_cert(PKI, c)
+    addr = c["public_ip"] or c["grey_ip"]
+    print(f"web UI: https://{addr}/  certificate SHA-256 {fp}")
+    print(f"  allowed from: {' '.join(c['ui_allow']) or 'nowhere yet (d2g setup --ui-allow CIDR)'}; "
+          f"admin certificate {'required' if c['ui_mtls'] else 'not required'}; admins: d2g admin add NAME")
 
 
 def local_receiver(c, cl, me):
@@ -366,7 +399,7 @@ def local_receiver(c, cl, me):
                             "bind": "127.0.0.1", "port": LOCAL_RX_PORT, "max_inflight": 4 * (os.cpu_count() or 1),
                             "max_per_job": 16})
     recv.db.init()
-    event("admin", "receiver rx0: local (on the orchestrator VM)")
+    event(actor(), "receiver rx0: local (on the orchestrator VM)")
     print(f"local receiver rx0 ({rx_dns(c, 'rx0')}): job volumes are attached to this VM")
 
 
@@ -427,7 +460,7 @@ def receiver_add(c, cl, az=None, flavor=None, fip=None, wait=True):
             fip_addr = cl.fip_attach(fid, sid)["floating_ip_address"]
         db().execute("UPDATE receivers SET grey_ip=?, fip_id=?, fip=? WHERE name=?", (ip, fid, fip_addr, name))
         write_nginx(c)
-        event("admin", f"receiver {name}: server {sid} {flavor} in {az}, {ip}{', FIP ' + fip_addr if fip_addr else ''}")
+        event(actor(), f"receiver {name}: server {sid} {flavor} in {az}, {ip}{', FIP ' + fip_addr if fip_addr else ''}")
         log(f"receiver {name}: server {sid} ACTIVE, {ip}{', FIP ' + fip_addr if fip_addr else ''}; waiting for it to join")
     except Exception:
         db().execute("UPDATE receivers SET state='failed' WHERE name=?", (name,))
@@ -479,7 +512,7 @@ def cmd_receiver(a):
             cl.delete_server(r["server_id"])
         db().execute("UPDATE receivers SET state='deleted' WHERE name=?", (a.name,))
         write_nginx(c)
-        event("admin", f"receiver {a.name}: deleted")
+        event(actor(), f"receiver {a.name}: deleted")
         print(f"receiver {a.name}: deleted (FIP returned to the pool)")
 
 
@@ -494,7 +527,7 @@ def cmd_agent(a):
         d.execute("INSERT INTO agents (name) VALUES (?) ON CONFLICT(name) DO NOTHING", (a.name,))
         d.execute("UPDATE agents SET token_hash=?, token_exp=?, path=?, threads=? WHERE name=?",
                   (h(tok), now() + TOKEN_TTL, a.path, a.threads, a.name))
-        event("admin", f"agent {a.name}: enrollment token issued")
+        event(actor(), f"agent {a.name}: enrollment token issued")
         pin = C.pubkey_pin(PKI + "/ctl.crt")
         print(f"# valid for {TOKEN_TTL // 60} min, once. On the source VM, as root (pick the address it can reach):")
         for kind, ip in (("public", c.get("public_ip")), ("grey", c["grey_ip"])):
@@ -512,12 +545,12 @@ def cmd_agent(a):
                   f"cmd {r['command'] or '-'}  last: rc={rep.get('rc', '-')} {rep.get('summary', '')}")
     elif a.op == "revoke":
         d.execute("UPDATE agents SET revoked=1, token_hash=NULL WHERE name=?", (a.name,))
-        event("admin", f"agent {a.name}: revoked")
+        event(actor(), f"agent {a.name}: revoked")
         print(f"{a.name}: revoked")
     elif a.op in ("sync", "uninstall"):
         d.execute("SELECT 1 FROM agents WHERE name=? AND cert_serial IS NOT NULL", (a.name,)).fetchone() or die("not enrolled")
         cid = queue_command(a.name, a.op)
-        event("admin", f"agent {a.name}: {a.op} queued")
+        event(actor(), f"agent {a.name}: {a.op} queued")
         print(f"{a.name}: {a.op} queued ({cid}); the agent picks it up within ~15 s")
 
 
@@ -602,7 +635,7 @@ def cmd_job(a):
                   (jid, a.arg, r["name"], vid, vid[:20], az, disk, c["part_mb"] << 20, now(), 0 if a.no_start else 1,
                    a.every or 0))
         cl.attach(r["server_id"], vid)
-        event("admin", f"job {jid}: volume {vid} {gb} GB attached to {r['name']}")
+        event(actor(), f"job {jid}: volume {vid} {gb} GB attached to {r['name']}")
         j = wait_job(jid, lambda j: j["state"] != "attaching", 180, "the receiver to serve the volume")
         print(f"job {jid}: agent {a.arg}, receiver {r['name']}, volume {vid} ({gb} GB), state {j['state']}"
               + ("" if a.no_start else "; first pass queued"))
@@ -632,7 +665,7 @@ def cmd_job(a):
             if not a.keep_volume:
                 cl.call("DELETE", "volumev3", f"/volumes/{j['volume_id']}")
             d.execute("UPDATE jobs SET state='deleted' WHERE id=?", (j["id"],))
-            event("admin", f"job {j['id']}: deleted{' (volume kept)' if a.keep_volume else ''}")
+            event(actor(), f"job {j['id']}: deleted{' (volume kept)' if a.keep_volume else ''}")
             print(f"job {j['id']}: deleted")
             return
         ag = d.execute("SELECT inventory FROM agents WHERE name=?", (j["agent"],)).fetchone()
@@ -648,7 +681,7 @@ def cmd_job(a):
         s = cl.wait_server(sid)
         ips = [x["addr"] for n in s.get("addresses", {}).values() for x in n]
         d.execute("UPDATE jobs SET state='finished' WHERE id=?", (j["id"],))
-        event("admin", f"job {j['id']}: VM {name} {sid} created from volume {j['volume_id']}, {ips}")
+        event(actor(), f"job {j['id']}: VM {name} {sid} created from volume {j['volume_id']}, {ips}")
         print(f"VM {name} {sid} ACTIVE {' '.join(ips)} (snapshot {j['synced_snapshot']})")
 
 

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>d2g — вход</title>
+<link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+<form class="login" id="f" autocomplete="on">
+  <h1>d2g · оркестратор</h1>
+  <p>Перенос ВМ в облако. Вход администратора.</p>
+  <div class="field"><label for="u">Пользователь</label><input id="u" name="username" autocomplete="username" required autofocus></div>
+  <div class="field"><label for="p">Пароль</label><input id="p" type="password" name="password" autocomplete="current-password" required></div>
+  <div class="field" id="tf" hidden><label for="t">Код из приложения (TOTP)</label><input id="t" inputmode="numeric" autocomplete="one-time-code" maxlength="8"></div>
+  <div class="err" id="e"></div>
+  <button class="btn primary" type="submit">Войти</button>
+</form>
+<script src="/ui/login.js"></script>
+</body>
+</html>

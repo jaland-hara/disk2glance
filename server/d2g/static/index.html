@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>d2g — оркестратор</title>
+<link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+<header>
+  <div class="brand">d2g<small id="ctl"></small></div>
+  <nav id="tabs">
+    <button data-tab="overview" class="on">Обзор</button>
+    <button data-tab="agents">Исходные ВМ</button>
+    <button data-tab="jobs">Задания</button>
+    <button data-tab="receivers">Приёмники</button>
+    <button data-tab="log">Журнал</button>
+    <button data-tab="settings">Настройки</button>
+  </nav>
+  <span class="me" id="me"></span>
+  <button class="btn" data-act="logout">Выйти</button>
+</header>
+<main id="main"><div class="panel"><div class="empty">Загрузка…</div></div></main>
+<div id="modal"></div>
+<div class="toast" id="toast"></div>
+<script src="/ui/app.js"></script>
+</body>
+</html>
