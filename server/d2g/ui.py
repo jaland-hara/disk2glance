@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 JOB_RE = re.compile(r"^j[0-9a-f]{8}$")
 RX_RE = re.compile(r"^rx[0-9]{1,3}$")
+TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
 ARG_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
 
@@ -155,16 +156,22 @@ def run_now(who, argv):
 
 
 # --- cloud lists for the forms (cached) ----------------------------------------------------------------------
-_cloud_cache = {"t": 0, "v": None}
+_cloud_cache = {"t": 0, "v": None}   # "t": 0 drops every project's cache
+_cloud_by = {}
 _cloud_lock = threading.Lock()
 
 
-def cloud_lists():
+def cloud_lists(target="home"):
+    """Lists for the forms (cached 5 min per project)."""
+    from . import targets as T
     with _cloud_lock:
-        if _cloud_cache["v"] and time.time() - _cloud_cache["t"] < 300:
-            return _cloud_cache["v"]
-        from .cloud import Cloud
-        cl = Cloud()
+        if _cloud_cache["t"] == 0:
+            _cloud_by.clear()
+            _cloud_cache["t"] = 1
+        hit = _cloud_by.get(target)
+        if hit and time.time() - hit[0] < 300:
+            return hit[1]
+        cl = T.cloud_for(target)
         fl = cl.call("GET", "compute", "/flavors/detail")["flavors"]
         v = {"flavors": sorted(({"name": f["name"], "vcpus": f["vcpus"], "ram": f["ram"]} for f in fl),
                                key=lambda f: (f["vcpus"], f["ram"], f["name"])),
@@ -179,7 +186,7 @@ def cloud_lists():
                              for f in cl.call("GET", "network", "/floatingips")["floatingips"]), key=lambda f: f["ip"]),
              "cloud": {k: cl.env.get(k, "") for k in ("OS_AUTH_URL", "OS_PROJECT_ID", "OS_USERNAME", "OS_USER_DOMAIN_NAME",
                                                       "OS_REGION_NAME")}}
-        _cloud_cache.update(t=time.time(), v=v)
+        _cloud_by[target] = (time.time(), v)
         return v
 
 
@@ -194,7 +201,8 @@ def state(c):
         info = json.loads(r["info"] or "{}")
         rx.append({"name": r["name"], "dns": O.rx_dns(c, r["name"]), "state": r["state"] if r["state"] != "up" or O.rx_up(r) else "down",
                    "local": bool(r["local"]), "flavor": r["flavor"], "az": r["az"], "grey_ip": r["grey_ip"], "fip": r["fip"],
-                   "volumes": n, "max_volumes": c["max_volumes"], "load": info.get("load"), "seen": r["last_seen"]})
+                   "volumes": n, "max_volumes": c["max_volumes"], "load": info.get("load"), "seen": r["last_seen"],
+                   "target": r["target"] or "home"})
     agents = []
     for a in d.execute("SELECT * FROM agents ORDER BY name"):
         inv = json.loads(a["inventory"] or "{}")
@@ -214,14 +222,23 @@ def state(c):
             rate = j["pass_parts"] * j["part_bytes"] / 2**20 / max(1, j["last_part"] - j["pass_start"])
         jobs.append({k: j[k] for k in ("id", "agent", "receiver", "volume_id", "az", "disk_bytes", "part_bytes", "state",
                                        "created", "sync_every", "parts", "pass_no", "pass_start", "pass_parts", "last_part",
-                                       "synced_at", "synced_snapshot", "server_id", "vm_name")} | {"nparts": n, "rate": rate})
+                                       "synced_at", "synced_snapshot", "server_id", "vm_name")}
+                    | {"nparts": n, "rate": rate, "target": j["target"] or "home"})
+    from . import targets as T
+    targets = [{"name": "home", "title": "проект оркестратора", "mode": "home", "project": c.get("project"), "region": "",
+                "az": c.get("az"), "network": c.get("network"), "check_ok": 1}]
+    for r in d.execute("SELECT * FROM targets ORDER BY name"):
+        t = T.tconf(c, r["name"])
+        targets.append({k: t.get(k) for k in ("name", "title", "mode", "project", "region", "az", "network", "rx_flavor",
+                                              "rx_volume_type", "fip_pool", "allow", "vm_sg", "max_volumes")}
+                       | {"check_ok": r["check_ok"], "checked_at": r["checked_at"]})
     tasks = [dict(t) for t in d.execute("SELECT id, who, what, state, started, finished, rc, substr(log, -3000) AS log "
                                         "FROM tasks ORDER BY started DESC LIMIT 20")]
     events = [dict(e) for e in d.execute("SELECT * FROM events ORDER BY ts DESC LIMIT 200")]
     return {"now": now(), "orchestrator": {k: c.get(k) for k in ("ctl_name", "grey_ip", "public_ip", "az", "network",
                                                                   "rx_flavor", "rx_volume_type", "max_volumes", "allow",
                                                                   "fip_pool", "ui_allow", "ui_mtls", "part_mb")},
-            "receivers": rx, "agents": agents, "jobs": jobs, "tasks": tasks, "events": events}
+            "receivers": rx, "agents": agents, "jobs": jobs, "tasks": tasks, "events": events, "targets": targets}
 
 
 # --- request handling (called from OrchHandler for connections without the ctl SNI name) ----------------------
@@ -277,7 +294,12 @@ def handle(h, method, p):
     if path == "/api/ui/state" and method == "GET":
         return h.reply(200, state(c), headers=SEC_HEADERS)
     if path == "/api/ui/cloud" and method == "GET":
-        return h.reply(200, cloud_lists(), headers=SEC_HEADERS)
+        import urllib.parse
+        q = urllib.parse.parse_qs(h.path.split("?", 1)[1] if "?" in h.path else "")
+        tg = (q.get("target") or ["home"])[0]
+        if tg != "home" and not orch().db().execute("SELECT 1 FROM targets WHERE name=?", (tg,)).fetchone():
+            return h.reply(404, {"error": "no such project"}, headers=SEC_HEADERS)
+        return h.reply(200, cloud_lists(tg), headers=SEC_HEADERS)
     if path.startswith("/api/ui/task/") and method == "GET":
         t = orch().db().execute("SELECT * FROM tasks WHERE id=?", (p[-1],)).fetchone()
         return h.reply(200 if t else 404, dict(t) if t else {"error": "no task"}, headers=SEC_HEADERS)
@@ -404,8 +426,19 @@ def action(who, p, b, ip=""):
         if rc:
             raise ValueError(out)
         return {"message": out}
+    if p == ["target", "check"]:
+        from .setup import cloud_check
+        return cloud_check(orch().conf(), b, own=False, az=need(b, "az", optional=True))
+    if p == ["target", "save"]:
+        return target_save(who, b)
+    if len(p) == 3 and p[0] == "target" and p[2] == "delete":
+        rc, out = run_now(who, ["target", "delete", need({"t": p[1]}, "t", TARGET_RE)])
+        if rc:
+            raise ValueError(out[-1500:])
+        _cloud_cache["t"] = 0
+        return {"message": out}
     if p == ["job", "new"]:
-        argv = ["job", "new", need(b, "agent", NAME_RE)]
+        argv = ["job", "new", need(b, "agent", NAME_RE), "--target", need(b, "target", TARGET_RE, optional=True) or "home"]
         for k, flag in (("type", "--type"), ("az", "--az"), ("receiver", "--receiver")):
             v = need(b, k, optional=True)
             if v:
@@ -438,7 +471,7 @@ def action(who, p, b, ip=""):
             argv = ["job", "delete", jid] + (["--keep-volume"] if b.get("keep_volume") else [])
             return {"task": run_task(who, f"delete {jid}", argv)}
     if p == ["receiver", "add"]:
-        argv = ["receiver", "add"]
+        argv = ["receiver", "add", "--target", need(b, "target", TARGET_RE, optional=True) or "home"]
         for k in ("az", "flavor", "fip"):
             v = need(b, k, optional=True)
             if v:
@@ -447,6 +480,55 @@ def action(who, p, b, ip=""):
     if len(p) == 3 and p[0] == "receiver" and p[2] == "delete":
         return {"task": run_task(who, f"delete receiver {p[1]}", ["receiver", "delete", need({"r": p[1]}, "r", RX_RE)])}
     raise ValueError("unknown action")
+
+
+def target_save(who, b):
+    """Add or change a target project: the account goes to a temporary file (600) for 'd2g target'."""
+    from . import targets as T
+    from .setup import env_of, cidr
+    name = need(b, "name", TARGET_RE)
+    if name == "home":
+        raise ValueError("имя home занято проектом оркестратора")
+    exists = orch().db().execute("SELECT 1 FROM targets WHERE name=?", (name,)).fetchone()
+    mode = b.get("mode")
+    if mode not in ("transfer", "receiver"):
+        raise ValueError("способ: transfer или receiver")
+    argv = ["target", "set" if exists else "add", name, "--mode", mode, "--replace-lists"]
+    tmp = None
+    if b.get("password"):
+        env = env_of(b)
+        os.makedirs(T.TDIR, mode=0o700, exist_ok=True)
+        tmp = os.path.join(T.TDIR, f".new-{name}-{secrets.token_hex(3)}")
+        with open(tmp, "w") as f:
+            os.chmod(tmp, 0o600)
+            import shlex
+            f.write("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()))
+        argv += ["--openrc", tmp]
+    elif not exists:
+        raise ValueError("нужен пароль служебной учётки проекта")
+    if b.get("title"):
+        argv += ["--title", str(b["title"])[:64]]
+    for k in ("az", "network", "rx_flavor", "rx_volume_type", "rx_key"):
+        v = need(b, k, optional=True)
+        if v:
+            argv += ["--" + k.replace("_", "-"), v]
+    if b.get("max_volumes"):
+        argv += ["--max-volumes", str(max(1, min(26, int(b["max_volumes"]))))]
+    for x in b.get("allow") or []:
+        argv += ["--allow", cidr(x)]
+    for x in b.get("fip_pool") or []:
+        argv += ["--fip-pool", need({"f": x}, "f")]
+    for x in b.get("vm_sg") or []:
+        argv += ["--vm-sg", need({"s": x}, "s")]
+    try:
+        rc, out = run_now(who, argv)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+    if rc:
+        raise ValueError(out[-1500:])
+    _cloud_cache["t"] = 0
+    return {"message": out.strip().splitlines()[-1] if out.strip() else "сохранено"}
 
 
 # --- UI certificate ------------------------------------------------------------------------------------

@@ -110,7 +110,9 @@ def env_of(b):
     return env
 
 
-def cloud_check(c, b):
+def cloud_check(c, b, own=True, az=None):
+    """own: the account of the orchestrator's own project (its VM must be visible there).
+    az: zone for the probe volume (default: the orchestrator's zone, or the first zone)."""
     from .cloud import Cloud, metadata
     env = env_of(b)
     try:
@@ -119,6 +121,15 @@ def cloud_check(c, b):
         raise ValueError(f"Keystone не принял учётные данные: {ex}") from None
     md = metadata()
     checks, me = [], {}
+    if not own:
+        zones = []
+        try:
+            zones = sorted(z["zoneName"] for z in cl.call("GET", "compute", "/os-availability-zone")["availabilityZoneInfo"]
+                           if z.get("zoneState", {}).get("available"))
+        except Exception:  # noqa: BLE001
+            pass
+        md = dict(md, availability_zone=az if az in zones else (md["availability_zone"] if md["availability_zone"] in zones
+                                                                  else (zones or [md["availability_zone"]])[0]))
 
     def chk(name, fn):
         try:
@@ -126,13 +137,14 @@ def cloud_check(c, b):
         except Exception as ex:  # noqa: BLE001
             checks.append({"name": name, "ok": False, "detail": str(ex)[:300]})
 
-    def own():
+    def own_vm():
         s = cl.server(md["uuid"])
         me["networks"] = list(s.get("addresses", {}))
         me["security_groups"] = sorted({g["name"] for g in s.get("security_groups", [])})
         me["fip"] = next((a["addr"] for n in s["addresses"].values() for a in n if a.get("OS-EXT-IPS:type") == "floating"), "")
         return f"{s['name']}, сети: {', '.join(me['networks'])}"
-    chk("Эта ВМ видна в проекте", own)
+    if own:
+        chk("Эта ВМ видна в проекте", own_vm)
     chk("Просмотр ВМ и томов", lambda: (cl.call("GET", "compute", "/servers?limit=1"), cl.call("GET", "volumev3", "/volumes?limit=1")) and "")
 
     def vol():

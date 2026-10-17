@@ -1,6 +1,6 @@
 "use strict";
 // d2g orchestrator web UI: polls /api/ui/state, renders tabs, runs actions through the UI API.
-let S = null, ME = null, CLOUD = null, TAB = "overview", WATCH = new Set(), LOGOPEN = new Set();
+let S = null, ME = null, CLOUD = {}, TAB = "overview", WATCH = new Set(), LOGOPEN = new Set();
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const GiB = (b) => (b ? (b / 2 ** 30).toFixed(b >= 10 * 2 ** 30 ? 0 : 1) + " ГиБ" : "—");
@@ -99,12 +99,12 @@ function vAgents() {
 }
 function jobsTable(list, compact) {
   if (!list.length) return `<div class="panel"><div class="empty">${compact ? "Активных заданий нет" : "Заданий ещё нет. Сначала подключите исходную ВМ, затем создайте задание."}</div></div>`;
-  return `<div class="panel"><table><tr><th>Задание</th><th>ВМ</th><th>Состояние</th><th>Прогресс</th><th>Синхронизировано</th>${compact ? "" : "<th>Приёмник / том</th><th>Расписание</th>"}<th></th></tr>` +
+  return `<div class="panel"><table><tr><th>Задание</th><th>ВМ</th><th>Состояние</th><th>Прогресс</th><th>Синхронизировано</th>${compact ? "" : "<th>Куда / приёмник / том</th><th>Расписание</th>"}<th></th></tr>` +
     list.map((j) => { const ag = S.agents.find((a) => a.name === j.agent) || {}; const queued = ag.command === "sync" && j.state !== "receiving" && j.state !== "finished";
       return `<tr><td class="mono">${esc(j.id)}</td><td><b>${esc(j.agent)}</b><div class="small muted">${GiB(j.disk_bytes)}</div></td>
       <td>${badge(JOB_STATE, j.state)}${queued ? '<div class="small"><span class="badge info">проход в очереди</span></div>' : ""}${j.vm_name ? `<div class="small">ВМ ${esc(j.vm_name)}</div>` : ""}</td><td>${jobProgress(j)}</td>
       <td class="small">${j.synced_at ? ago(j.synced_at) + `<div class="muted">снапшот ${esc((j.synced_snapshot || "").replace("T", " ").replace(/\.\d+Z$/, " UTC"))}</div>` : "—"}</td>
-      ${compact ? "" : `<td class="small">${esc(j.receiver)}<div class="muted mono">${esc((j.volume_id || "").slice(0, 8))} · ${esc(j.az)}</div></td>
+      ${compact ? "" : `<td class="small"><b>${esc(tgtLabel(j.target))}</b><div class="muted">${esc(j.receiver)} · <span class="mono">${esc((j.volume_id || "").slice(0, 8))}</span> · ${esc(j.az)}</div></td>
       <td class="small">${j.sync_every ? "каждые " + dur(j.sync_every) : "—"}</td>`}
       <td><div class="actions">${["synced", "ready"].includes(j.state) && !queued ? `<button class="btn" data-act="job-sync" data-id="${esc(j.id)}">Дельта</button>` : ""}
         ${!compact && ["synced", "ready", "receiving"].includes(j.state) ? `<button class="btn" data-act="job-every" data-id="${esc(j.id)}">Расписание</button>` : ""}
@@ -119,7 +119,7 @@ function vReceivers() {
   return `<h2><span class="grow">Приёмники</span><button class="btn primary" data-act="rx-add">Добавить приёмник</button></h2>
   <div class="panel"><table><tr><th>Имя</th><th>Состояние</th><th>ВМ</th><th>Адреса</th><th class="num">Томов</th><th class="num">Нагрузка</th><th>Связь</th><th></th></tr>` +
     S.receivers.map((r) => `<tr><td><b>${esc(r.name)}</b><div class="small muted mono">${esc(r.dns)}</div></td><td>${badge(RX_STATE, r.state)}</td>
-      <td class="small">${r.local ? "на ВМ оркестратора" : esc(r.flavor)}<div class="muted">${esc(r.az)}</div></td>
+      <td class="small">${r.local ? "на ВМ оркестратора" : esc(r.flavor)}<div class="muted">${esc(tgtLabel(r.target))} · ${esc(r.az)}</div></td>
       <td class="small mono">${esc(r.grey_ip || "—")}${r.fip ? "<br>FIP " + esc(r.fip) : ""}</td><td class="num">${r.volumes}/${r.max_volumes}</td>
       <td class="num">${r.load != null ? Number(r.load).toFixed(2) : "—"}</td><td class="small nowrap">${ago(r.seen)}</td>
       <td>${r.local ? "" : `<button class="btn danger" data-act="rx-delete" data-name="${esc(r.name)}" ${r.volumes ? "disabled" : ""}>Удалить</button>`}</td></tr>`).join("") +
@@ -144,7 +144,75 @@ function vSettings() {
   </div></div>
   <p class="small muted">Администраторы и сертификат администратора — на ВМ оркестратора: <span class="mono">d2g admin add|passwd|totp|cert ИМЯ</span>, <span class="mono">d2g setup --ui-mtls on|off</span>.</p>`;
 }
-const VIEWS = { overview: vOverview, agents: vAgents, jobs: vJobs, receivers: vReceivers, log: vLog, settings: vSettings };
+function vTargets() {
+  const cnt = (name, list, f) => list.filter((x) => (x.target || "home") === name && f(x)).length;
+  return `<h2><span class="grow">Проекты</span><button class="btn primary" data-act="tg-add">Добавить проект</button></h2>
+  <div class="panel"><table><tr><th>Проект</th><th>Способ</th><th>ID проекта · регион</th><th>Зона, сеть</th><th class="num">Приёмники</th><th class="num">Задания</th><th>Учётка</th><th></th></tr>` +
+    S.targets.map((t) => `<tr><td><b>${esc(t.name === "home" ? "этот проект" : t.title || t.name)}</b><div class="small muted mono">${esc(t.name)}</div></td>
+      <td>${badge(MODE, t.mode)}</td><td class="small mono">${esc(t.project || "")}<div class="muted">${esc(t.region || "")}</div></td>
+      <td class="small">${esc(t.az || "—")}<div class="muted">${esc(t.network || "—")}</div></td>
+      <td class="num">${cnt(t.name, S.receivers, () => true)}</td><td class="num">${cnt(t.name, S.jobs, (j) => j.state !== "finished")}</td>
+      <td>${t.name === "home" ? '<span class="small muted">в «Настройках»</span>' : t.check_ok ? `<span class="badge ok">проверена</span><div class="small muted">${ago(t.checked_at)}</div>` : '<span class="badge bad">проверка не прошла</span>'}</td>
+      <td>${t.name === "home" ? "" : `<div class="actions"><button class="btn" data-act="tg-edit" data-name="${esc(t.name)}">Изменить</button>
+        <button class="btn danger" data-act="tg-delete" data-name="${esc(t.name)}">Удалить</button></div>`}</td></tr>`).join("") + `</table></div>
+  <p class="small muted"><b>Передача тома</b> — диск принимается в проекте оркестратора, а при «Создать ВМ» том передаётся в проект и ВМ создаётся там; нужна только служебная учётка проекта, работает в пределах одного региона.
+  <b>Свой приёмник</b> — оркестратор создаёт приёмник внутри проекта (учёткой проекта), диск туда и принимается; подходит для другого региона и когда данные не должны появляться в проекте оркестратора. Приёмник ходит к оркестратору по его публичному адресу, агенты — к приёмнику по серому адресу или его FIP.</p>`;
+}
+async function editTarget(name) {
+  const t = name ? tgt(name) : { name: "", title: "", mode: "transfer", allow: [], fip_pool: [], vm_sg: ["default"] };
+  const home = (await cloud()).cloud || {};
+  let lists = name ? await cloud(name).catch(() => null) : null;
+  const creds = `<div class="grid2"><div class="field"><label>Имя (латиницей)</label><input id="tn" value="${esc(t.name)}" ${name ? "readonly" : ""} maxlength="24" placeholder="client-a"></div>
+      <div class="field"><label>Название</label><input id="tt" value="${esc(t.title || "")}" maxlength="64" placeholder="Клиент А, прод"></div></div>
+    <div class="field"><label>Способ</label><select id="tm"><option value="transfer" ${t.mode === "transfer" ? "selected" : ""}>передача тома (тот же регион)</option>
+      <option value="receiver" ${t.mode === "receiver" ? "selected" : ""}>свой приёмник в проекте</option></select></div>
+    <div class="field"><label>Адрес Keystone</label><input id="u" value="${esc(home.OS_AUTH_URL || "https://infra.mail.ru:35357/v3/")}"></div>
+    <div class="grid2"><div class="field"><label>ID проекта</label><input id="pr" class="mono" value="${esc(t.project || "")}"></div>
+      <div class="field"><label>Регион</label><input id="rg" value="${esc(t.region || home.OS_REGION_NAME || "RegionOne")}"></div></div>
+    <div class="grid2"><div class="field"><label>Служебная учётка</label><input id="un" autocomplete="off"></div>
+      <div class="field"><label>Домен</label><input id="dm" value="service-users"></div></div>
+    <div class="field"><label>Пароль</label><input id="pw" type="password" autocomplete="off" placeholder="${name ? "пусто — учётка не меняется" : ""}"></div>
+    <button class="btn" id="tchk">Проверить учётку</button> <span id="tchs" class="small muted"></span><div id="tres"></div><div id="tset"></div>`;
+  modal(name ? `Проект ${t.title || name}` : "Добавить проект", creds, [{ text: "Отмена" }, { text: "Сохранить", cls: "primary", ok: true }], async (m) => {
+    if (!lists) throw new Error("Сначала проверьте учётку");
+    const mode = val(m, "tm"), q = (id) => (m.querySelector("#" + id) ? val(m, id) : "");
+    const body = { name: val(m, "tn"), title: val(m, "tt"), mode, auth_url: val(m, "u"), project_id: val(m, "pr"), region: val(m, "rg"),
+      username: val(m, "un"), user_domain: val(m, "dm"), password: m.querySelector("#pw").value, az: q("taz"), network: q("tnet"),
+      rx_flavor: q("tfl"), rx_volume_type: q("tvt"), rx_key: q("tkey"),
+      allow: m.querySelector("#tal") ? lines(m.querySelector("#tal").value) : [],
+      fip_pool: [...m.querySelectorAll("#tfips input:checked")].map((x) => x.value), vm_sg: [...m.querySelectorAll("#tsg input:checked")].map((x) => x.value) };
+    const r = await api("/api/ui/target/save", body);
+    close(); CLOUD = {}; toast(r.message || "Сохранено"); refresh();
+  });
+  const m = $("#modal .modal");
+  const settings = () => {
+    const L = lists, rx = val(m, "tm") === "receiver";
+    if (!L) { m.querySelector("#tset").innerHTML = ""; return; }
+    const free = (L.fips || []).filter((f) => f.free || (t.fip_pool || []).includes(f.id));
+    m.querySelector("#tset").innerHTML = `<hr><div class="grid2"><div class="field"><label>Зона</label>${sel("taz", L.zones, t.az)}</div>
+      <div class="field"><label>Сеть ${rx ? "приёмников и " : ""}новых ВМ</label>${sel("tnet", L.networks, t.network)}</div></div>
+      <div class="field"><label>Группы безопасности новых ВМ</label><div class="checks" id="tsg">${L.security_groups.map((g) => `<label><input type="checkbox" value="${esc(g)}" ${(t.vm_sg || ["default"]).includes(g) ? "checked" : ""}>${esc(g)}</label>`).join("")}</div></div>
+      ${rx ? `<div class="grid2"><div class="field"><label>Флейвор приёмников</label><select id="tfl">${L.flavors.map((f) => `<option value="${esc(f.name)}" ${f.name === (t.rx_flavor || "STD3-4-4") ? "selected" : ""}>${esc(f.name)} — ${f.vcpus} vCPU</option>`).join("")}</select></div>
+        <div class="field"><label>Тип томов</label>${sel("tvt", L.volume_types, t.rx_volume_type || (L.volume_types.includes("ceph-ssd") ? "ceph-ssd" : ""))}</div></div>
+        <div class="field"><label>Ключ SSH приёмников</label>${sel("tkey", L.keypairs, t.rx_key || "", "без ключа")}</div>
+        <div class="field"><label>FIP для приёмников</label><div class="checks" id="tfips">${free.map((f) => `<label><input type="checkbox" value="${esc(f.id)}" ${(t.fip_pool || []).includes(f.id) ? "checked" : ""}>${esc(f.ip)}</label>`).join("") || '<span class="small muted">свободных FIP нет — агенты дойдут до приёмника только по серому адресу (источник в той же сети или Direct Connect)</span>'}</div></div>
+        <div class="field"><label>Исходные ВМ приходят с (443 на приёмниках проекта)</label><textarea id="tal">${esc((t.allow || []).join("\n"))}</textarea></div>` : ""}`;
+  };
+  m.querySelector("#tm").addEventListener("change", settings);
+  m.querySelector("#tchk").addEventListener("click", async () => {
+    m.querySelector("#tchs").innerHTML = '<span class="spinner"></span>создаю и удаляю пробный том и группу безопасности…';
+    m.querySelector("#tres").innerHTML = "";
+    try {
+      const r = await api("/api/ui/target/check", { auth_url: val(m, "u"), project_id: val(m, "pr"), region: val(m, "rg"), username: val(m, "un"),
+        user_domain: val(m, "dm"), password: m.querySelector("#pw").value, az: t.az || "" });
+      m.querySelector("#tres").innerHTML = `<ul class="small">${r.checks.map((x) => `<li>${x.ok ? "✓" : "✗"} ${esc(x.name)} <span class="muted">${esc(x.detail)}</span></li>`).join("")}</ul>`;
+      lists = r.lists; t.az = t.az || r.az; settings();
+    } catch (x) { m.querySelector("#tres").innerHTML = `<div class="err">${esc(x.message)}</div>`; }
+    m.querySelector("#tchs").textContent = "";
+  });
+  settings();
+}
+const VIEWS = { overview: vOverview, agents: vAgents, jobs: vJobs, receivers: vReceivers, targets: vTargets, log: vLog, settings: vSettings };
 function render() {
   if (!S) return;
   $("#main").innerHTML = VIEWS[TAB]();
@@ -171,7 +239,12 @@ const close = () => { $("#modal").innerHTML = ""; };
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#modal").firstChild) close(); });
 const sel = (id, opts, cur, empty) => `<select id="${id}">${empty !== undefined ? `<option value="">${esc(empty)}</option>` : ""}${opts.map((o) => `<option ${o === cur ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
 const val = (m, id) => m.querySelector("#" + id).value.trim();
-async function cloud() { if (!CLOUD) CLOUD = await api("/api/ui/cloud"); return CLOUD; }
+async function cloud(target = "home") { if (!CLOUD[target]) CLOUD[target] = await api("/api/ui/cloud?target=" + encodeURIComponent(target)); return CLOUD[target]; }
+const tgt = (name) => (S.targets || []).find((t) => t.name === name) || { name, title: name, mode: "home" };
+const tgtLabel = (name) => { const t = tgt(name); return t.name === "home" ? "этот проект" : (t.title || t.name); };
+const MODE = { home: ["проект оркестратора", ""], transfer: ["передача тома", "info"], receiver: ["свой приёмник", "warn"] };
+// where job volumes live: the target itself in receiver mode, else the orchestrator's project
+const volOwner = (name) => (tgt(name).mode === "receiver" ? name : "home");
 
 function startTask(r, what) {
   if (r.task) { WATCH.add(r.task); LOGOPEN.add(r.task); toast(`${what}: запущено, ход — во вкладке «Журнал»`); }
@@ -197,29 +270,38 @@ function addAgent(name) {
       refresh();
     });
 }
-async function newJob() {
+async function newJob(target, agent) {
   const busy = new Set(S.jobs.filter((j) => j.state !== "finished").map((j) => j.agent));
   const free = S.agents.filter((a) => a.state === "enrolled" && !busy.has(a.name)).map((a) => a.name);
   if (!free.length) return toast("Нет подключённых ВМ без задания: сначала добавьте исходную ВМ", true);
-  const c = await cloud();
+  target = target || "home";
+  const t = tgt(target), owner = volOwner(target), c = await cloud(owner), to = owner === "home" ? S.orchestrator : t;
+  const how = t.mode === "transfer" ? "Диск принимается в проекте оркестратора; при «Создать ВМ» том передаётся в выбранный проект и ВМ создаётся там."
+    : t.mode === "receiver" ? "Диск принимается приёмником внутри выбранного проекта; если приёмника нет, оркестратор создаст его (около 2 мин)."
+    : "Том, приёмник и будущая ВМ — в проекте оркестратора.";
   modal("Новое задание",
-    `<div class="field"><label>Исходная ВМ</label>${sel("a", free)}</div>
-     <div class="field"><label>Тип тома</label>${sel("vt", c.volume_types, S.orchestrator.rx_volume_type)}</div>
-     <div class="field"><label>Зона</label>${sel("az", c.zones, S.orchestrator.az)}<div class="hint">том, приёмник и будущая ВМ будут в этой зоне</div></div>
+    `<div class="field"><label>Исходная ВМ</label>${sel("a", free, agent)}</div>
+     <div class="field"><label>Куда переносить</label><select id="tg">${S.targets.map((x) => `<option value="${esc(x.name)}" ${x.name === target ? "selected" : ""}>${esc(x.name === "home" ? "этот проект (оркестратора)" : (x.title || x.name) + " — " + MODE[x.mode][0])}</option>`).join("")}</select>
+       <div class="hint">${esc(how)}</div></div>
+     <div class="field"><label>Тип тома</label>${sel("vt", c.volume_types, to.rx_volume_type)}</div>
+     <div class="field"><label>Зона</label>${sel("az", c.zones, to.az)}<div class="hint">том, приёмник и будущая ВМ будут в этой зоне</div></div>
      <div class="field"><label>Дельты по расписанию</label><select id="ev"><option value="0">нет, по кнопке</option><option value="900">каждые 15 мин</option>
        <option value="3600">каждый час</option><option value="14400">каждые 4 ч</option><option value="86400">раз в сутки</option></select></div>
      <p class="small muted">Том создаётся по размеру диска исходной ВМ и подключается к приёмнику; первый проход стартует сам.</p>`,
     [{ text: "Отмена" }, { text: "Создать", cls: "primary", ok: true }],
-    async (m) => { const r = await api("/api/ui/job/new", { agent: val(m, "a"), type: val(m, "vt"), az: val(m, "az"), every: +val(m, "ev") }); close(); startTask(r, "Новое задание"); });
+    async (m) => { const r = await api("/api/ui/job/new", { agent: val(m, "a"), target: val(m, "tg"), type: val(m, "vt"), az: val(m, "az"), every: +val(m, "ev") }); close(); startTask(r, "Новое задание"); });
+  // another project: other zones and volume types
+  $("#tg").addEventListener("change", (e) => { const a = val($("#modal .modal"), "a"); newJob(e.target.value, a).catch((x) => toast(x.message, true)); });
 }
 async function finishJob(id) {
-  const j = S.jobs.find((x) => x.id === id), c = await cloud();
+  const j = S.jobs.find((x) => x.id === id), t = tgt(j.target), c = await cloud(j.target);
+  const where = t.name === "home" ? "" : `<p class="small">ВМ будет создана в проекте <b>${esc(t.title || t.name)}</b>${t.mode === "transfer" ? " — том сначала будет передан туда из проекта оркестратора" : ""}.</p>`;
   modal(`Создать ВМ из ${j.agent}`,
-    `<p class="small">Снапшот: <b>${esc((j.synced_snapshot || "").replace("T", " ").replace(/\.\d+Z$/, " UTC"))}</b> (${ago(j.synced_at)}). Чтобы ВМ была свежей, сначала сделайте дельту. Том отключится от приёмника, дальнейшие проходы будут невозможны.</p>
+    `<p class="small">Снапшот: <b>${esc((j.synced_snapshot || "").replace("T", " ").replace(/\.\d+Z$/, " UTC"))}</b> (${ago(j.synced_at)}). Чтобы ВМ была свежей, сначала сделайте дельту. Том отключится от приёмника, дальнейшие проходы будут невозможны.</p>${where}
      <div class="field"><label>Имя ВМ</label><input id="nm" value="${esc(j.agent)}-d2g" maxlength="64"></div>
      <div class="field"><label>Флейвор</label><select id="fl">${c.flavors.map((f) => `<option value="${esc(f.name)}">${esc(f.name)} — ${f.vcpus} vCPU, ${Math.round(f.ram / 1024)} ГБ</option>`).join("")}</select></div>
-     <div class="field"><label>Сеть</label>${sel("net", c.networks, S.orchestrator.network)}</div>
-     <div class="field"><label>Группы безопасности</label><div class="checks">${c.security_groups.map((g) => `<label><input type="checkbox" value="${esc(g)}" ${g === "default" ? "checked" : ""}>${esc(g)}</label>`).join("")}</div></div>
+     <div class="field"><label>Сеть</label>${sel("net", c.networks, t.network || S.orchestrator.network)}</div>
+     <div class="field"><label>Группы безопасности</label><div class="checks">${c.security_groups.map((g) => `<label><input type="checkbox" value="${esc(g)}" ${(t.vm_sg || ["default"]).includes(g) ? "checked" : ""}>${esc(g)}</label>`).join("")}</div></div>
      <div class="field"><label>Ключ SSH</label>${sel("key", c.keypairs, "", "без ключа")}</div>`,
     [{ text: "Отмена" }, { text: "Создать ВМ", cls: "primary", ok: true }],
     async (m) => {
@@ -235,14 +317,18 @@ function every(id) {
     [{ text: "Отмена" }, { text: "Сохранить", cls: "primary", ok: true }],
     async (m) => { const r = await api(`/api/ui/job/${id}/sync`, { every: +val(m, "ev") }); close(); toast(r.message || "Сохранено"); refresh(); });
 }
-async function addRx() {
-  const c = await cloud();
+async function addRx(target) {
+  target = target || "home";
+  const choices = S.targets.filter((x) => x.mode !== "transfer");
+  const t = tgt(target), c = await cloud(target), to = target === "home" ? S.orchestrator : t;
   modal("Добавить приёмник",
-    `<div class="field"><label>Зона</label>${sel("az", c.zones, S.orchestrator.az)}</div>
-     <div class="field"><label>Флейвор</label><select id="fl">${c.flavors.map((f) => `<option value="${esc(f.name)}" ${f.name === S.orchestrator.rx_flavor ? "selected" : ""}>${esc(f.name)} — ${f.vcpus} vCPU, ${Math.round(f.ram / 1024)} ГБ</option>`).join("")}</select></div>
-     <div class="field"><label>FIP</label><select id="fip"><option value="">без FIP (серый IP и через оркестратор)</option>${(S.orchestrator.fip_pool || []).length ? '<option value="auto">свободный из пула</option>' : ""}</select></div>`,
+    `<div class="field"><label>Проект</label><select id="tg">${choices.map((x) => `<option value="${esc(x.name)}" ${x.name === target ? "selected" : ""}>${esc(x.name === "home" ? "этот проект (оркестратора)" : x.title || x.name)}</option>`).join("")}</select></div>
+     <div class="field"><label>Зона</label>${sel("az", c.zones, to.az)}</div>
+     <div class="field"><label>Флейвор</label><select id="fl">${c.flavors.map((f) => `<option value="${esc(f.name)}" ${f.name === to.rx_flavor ? "selected" : ""}>${esc(f.name)} — ${f.vcpus} vCPU, ${Math.round(f.ram / 1024)} ГБ</option>`).join("")}</select></div>
+     <div class="field"><label>FIP</label><select id="fip"><option value="">без FIP (серый IP${target === "home" ? " и через оркестратор" : ""})</option>${(to.fip_pool || []).length ? '<option value="auto">свободный из пула</option>' : ""}</select></div>`,
     [{ text: "Отмена" }, { text: "Создать", cls: "primary", ok: true }],
-    async (m) => { const r = await api("/api/ui/receiver/add", { az: val(m, "az"), flavor: val(m, "fl"), fip: val(m, "fip") }); close(); startTask(r, "Новый приёмник"); });
+    async (m) => { const r = await api("/api/ui/receiver/add", { target: val(m, "tg"), az: val(m, "az"), flavor: val(m, "fl"), fip: val(m, "fip") }); close(); startTask(r, "Новый приёмник"); });
+  $("#tg").addEventListener("change", (e) => addRx(e.target.value).catch((x) => toast(x.message, true)));
 }
 const lines = (t) => t.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
 function setAccess() {
@@ -265,7 +351,7 @@ async function setRx() {
     async (m) => {
       const r = await api("/api/ui/settings/receivers", { rx_flavor: val(m, "fl"), rx_volume_type: val(m, "vt"), max_volumes: +val(m, "mv"),
         fip_pool: [...m.querySelectorAll(".checks input:checked")].map((x) => x.value) });
-      close(); CLOUD = null; toast(r.message); refresh();
+      close(); CLOUD = {}; toast(r.message); refresh();
     });
 }
 async function setCloud() {
@@ -283,7 +369,7 @@ async function setCloud() {
       const r = await api("/api/ui/settings/cloud", { auth_url: val(m, "u"), project_id: val(m, "pr"), region: val(m, "rg"), username: val(m, "un"),
         user_domain: val(m, "dm"), password: m.querySelector("#pw").value, save: true });
       m.querySelector("#res").innerHTML = `<ul class="small">${r.checks.map((x) => `<li>${x.ok ? "✓" : "✗"} ${esc(x.name)} <span class="muted">${esc(x.detail)}</span></li>`).join("")}</ul>`;
-      if (r.saved) { CLOUD = null; toast("Учётка облака сохранена"); setTimeout(close, 1500); } else throw new Error("Не все проверки прошли, учётка не сохранена");
+      if (r.saved) { CLOUD = {}; toast("Учётка облака сохранена"); setTimeout(close, 1500); } else throw new Error("Не все проверки прошли, учётка не сохранена");
     });
 }
 function confirmAct(title, text, okText, fn) {
@@ -309,6 +395,9 @@ document.addEventListener("click", (e) => {
   if (a === "job-finish") return run(finishJob(id));
   if (a === "job-delete") return confirmAct(`Удалить задание ${id}`, "Том будет отключён от приёмника и удалён вместе с перенесёнными данными. Исходная ВМ не меняется.", "Удалить", () => api(`/api/ui/job/${id}/delete`, {}));
   if (a === "rx-add") return run(addRx());
+  if (a === "tg-add") return run(editTarget());
+  if (a === "tg-edit") return run(editTarget(name));
+  if (a === "tg-delete") return confirmAct(`Удалить проект ${name}`, "Оркестратор забудет проект и удалит его учётку. Приёмников и незавершённых заданий в проекте быть не должно; ВМ в проекте не трогаются.", "Удалить", () => api(`/api/ui/target/${name}/delete`, {}));
   if (a === "set-access") return setAccess();
   if (a === "set-rx") return run(setRx());
   if (a === "set-cloud") return run(setCloud());

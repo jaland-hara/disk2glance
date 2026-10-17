@@ -6,9 +6,11 @@ Orchestrator (one VM per client project, installed with install.sh --role orch):
   d2g setup [--no-local-receiver] [--public-ip IP] [--ui-allow CIDR]... [--ui-mtls on|off] [--allow CIDR]... [--fip-pool ID]... [--rx-flavor F] [--rx-key K] [--rx-sg SG]...
   d2g status
   d2g admin add|passwd|totp [--off]|delete|cert NAME | list        web UI administrators
-  d2g receiver add [--az AZ] [--flavor F] [--fip ID|auto] [--no-wait] | list | delete NAME
+  d2g target add|set NAME --mode transfer|receiver --openrc FILE [--az] [--network] [--fip-pool ID]... [--allow CIDR]...
+  d2g target list | check NAME | delete NAME           other projects VMs can be moved into
+  d2g receiver add [--target T] [--az AZ] [--flavor F] [--fip ID|auto] [--no-wait] | list | delete NAME
   d2g agent add NAME [--path auto|rx-grey|rx-fip|ctl|ctl-grey] [--threads N] | list | revoke | sync | uninstall NAME
-  d2g job new AGENT [--receiver rxN] [--type T] [--every SEC] [--no-start] | list | show | sync [--every SEC] JOB
+  d2g job new AGENT [--target T] [--receiver rxN] [--type T] [--every SEC] [--no-start] | list | show | sync [--every SEC] JOB
   d2g job finish JOB --flavor F [--network N] [--sg S]... [--key K] [--name VM] | delete JOB [--keep-volume]
 Receiver (created by the orchestrator, cloud-init runs install.sh --role rx):
   d2g rx-join | rx-serve | rx-status
@@ -57,9 +59,29 @@ def main():
     p = sp.add_parser("serve")
     p.add_argument("--workers", type=int)
 
+    p = sp.add_parser("target")
+    p.add_argument("op", choices=["add", "set", "list", "check", "delete"])
+    p.add_argument("name", nargs="?")
+    p.add_argument("--mode", choices=["transfer", "receiver"])
+    p.add_argument("--openrc", help="openrc of the target project's service account")
+    p.add_argument("--title")
+    p.add_argument("--az")
+    p.add_argument("--network")
+    p.add_argument("--rx-image")
+    p.add_argument("--rx-flavor")
+    p.add_argument("--rx-volume-type")
+    p.add_argument("--rx-key")
+    p.add_argument("--allow", action="append", default=[])
+    p.add_argument("--fip-pool", action="append", default=[])
+    p.add_argument("--vm-sg", action="append", default=[])
+    p.add_argument("--max-volumes", type=int)
+    p.add_argument("--replace-lists", action="store_true")
+    p.add_argument("--force", action="store_true", help="save even if the checks fail")
+
     p = sp.add_parser("receiver")
     p.add_argument("op", choices=["add", "list", "delete"])
     p.add_argument("name", nargs="?")
+    p.add_argument("--target", default="home", help="project: home or a target in receiver mode")
     p.add_argument("--az")
     p.add_argument("--flavor")
     p.add_argument("--fip", help="floating IP id from the pool, or 'auto'")
@@ -74,6 +96,7 @@ def main():
     p = sp.add_parser("job")
     p.add_argument("op", choices=["new", "list", "show", "sync", "finish", "delete"])
     p.add_argument("arg", nargs="?")
+    p.add_argument("--target", default="home", help="project to move the VM into: home or a target")
     p.add_argument("--receiver")
     p.add_argument("--az")
     p.add_argument("--type")
@@ -96,6 +119,10 @@ def main():
 
     a = ap.parse_args()
     os.umask(0o077)
+    if a.cmd == "target":
+        from . import orch as O, targets as T
+        O.db_init()
+        return T.cmd_target(a)
     if a.cmd in ("receiver", "agent") and a.op not in ("list",) and a.op != "add" and not a.name:
         C.die("name required")
     if a.cmd == "agent" and a.op == "add" and not a.name:
