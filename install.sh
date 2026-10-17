@@ -44,7 +44,7 @@ if [ "$UNINSTALL" = 1 ]; then
   command -v semanage >/dev/null && semanage fcontext -d "$PREFIX/modules(/.*)?" 2>/dev/null || true
   if [ -f /etc/systemd/system/disk2rx-agent.service ]; then
     systemctl disable -q --now disk2rx-agent.service 2>/dev/null || true
-    rm -f /etc/systemd/system/disk2rx-agent.service; systemctl daemon-reload
+    rm -f /etc/systemd/system/disk2rx-agent.service /etc/needrestart/conf.d/disk2rx.conf; systemctl daemon-reload
   fi
   rm -rf "$PREFIX" /usr/local/sbin/disk2glance /usr/local/sbin/disk2s3 /usr/local/sbin/disk2rx /run/disk2glance /run/disk2s3 /run/disk2rx /var/log/disk2glance.log /var/log/disk2s3.log /var/log/disk2rx.log
   for c in disk2glance disk2s3 disk2rx; do [ "$(readlink /usr/sbin/$c 2>/dev/null)" = "$PREFIX/bin/$c" ] && rm -f /usr/sbin/$c; done

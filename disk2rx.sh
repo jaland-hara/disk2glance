@@ -142,6 +142,9 @@ RestartSec=15
 [Install]
 WantedBy=multi-user.target
 UNITEOF
+    # needrestart (unattended-upgrades) would restart the agent in the middle of a pass
+    [ -d /etc/needrestart ] && { mkdir -p /etc/needrestart/conf.d
+      echo '$nrconf{override_rc}{qr(^disk2rx-agent\.service$)} = 0;' >/etc/needrestart/conf.d/disk2rx.conf; }
     systemctl daemon-reload && systemctl enable -q --now disk2rx-agent.service
     log "disk2rx-agent.service started: the orchestrator can start passes (d2g job new / d2g agent sync)"
   fi
