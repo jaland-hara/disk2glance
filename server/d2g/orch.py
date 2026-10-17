@@ -24,6 +24,7 @@ NGINX_CONF = "/etc/nginx/d2g-stream.conf"
 TOKEN_TTL = 3600
 RX_SG = "d2g-receivers"
 LOCAL_RX_PORT = 9443   # the receiver on the orchestrator VM, behind nginx
+UI_PORT = 8444         # the web UI (nginx default route: browsers come by IP, without SNI)
 ACTIVE = ("attaching", "ready", "receiving", "synced")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -86,7 +87,7 @@ def write_nginx(c):
     for r in db().execute("SELECT name, grey_ip, local FROM receivers WHERE grey_ip IS NOT NULL AND state!='deleted'"):
         up = f"127.0.0.1:{LOCAL_RX_PORT}" if r["local"] else f"{r['grey_ip']}:443"
         lines.append(f"    {rx_dns(c, r['name'])} {up};")
-    lines += [f"    {c['ctl_name']} 127.0.0.1:{c['api_port']};", f"    default 127.0.0.1:{c['api_port']};", "}",
+    lines += [f"    {c['ctl_name']} 127.0.0.1:{c['api_port']};", f"    default 127.0.0.1:{c.get('ui_port', UI_PORT)};", "}",
               "server {", "    listen 443;", "    ssl_preread on;", "    proxy_pass $d2g_upstream;",
               "    proxy_protocol on;", "    proxy_connect_timeout 10s;", "    proxy_timeout 600s;", "}", ""]
     new = "\n".join(lines)
@@ -118,7 +119,7 @@ class OrchHandler(C.Handler):
 
     def route(self, method, p):
         c = self.server.conf
-        if getattr(self.connection, "d2g_ui", False):
+        if self.server.ui:
             from . import ui
             return ui.handle(self, method, p)
         if p == ["v1", "ping"]:
@@ -291,18 +292,17 @@ def cmd_serve(a):
     db().execute("UPDATE tasks SET state='interrupted', finished=? WHERE state='running'", (now(),))
     srv = C.Server(("127.0.0.1", c["api_port"]), OrchHandler)
     srv.ctx = C.server_ctx(f"{PKI}/ctl.crt", f"{PKI}/ctl.key", f"{PKI}/ca.crt")
-    # browsers come by IP (no SNI) or any other name: they get the UI and its own certificate
-    ui_ctx = C.server_ctx(f"{PKI}/ui.crt", f"{PKI}/ui.key", f"{PKI}/ca.crt")
-    ui_ctx.verify_mode = ssl.CERT_OPTIONAL if c.get("ui_mtls") else ssl.CERT_NONE
-
-    def sni(sock, name, _ctx):
-        if name != c["ctl_name"]:
-            sock.context = ui_ctx
-            sock.d2g_ui = True
-    srv.ctx.sni_callback = sni
-    srv.conf = c
-    log(f"orchestrator {c['ctl_name']} on 127.0.0.1:{c['api_port']} (behind nginx :443), project {c.get('project', '?')}")
-    C.serve(srv, a.workers or 2, in_parent=scheduler)
+    srv.conf, srv.ui = c, False
+    # the web UI is a separate listener: browsers come by IP (no SNI) and nginx sends them here.
+    # One listener with an SNI switch would keep the agents' client-certificate request (OpenSSL
+    # keeps the verify mode of the first context) and browsers would ask for a certificate.
+    ui = C.Server(("127.0.0.1", c.get("ui_port", UI_PORT)), OrchHandler)
+    ui.ctx = C.server_ctx(f"{PKI}/ui.crt", f"{PKI}/ui.key", f"{PKI}/ca.crt")
+    ui.ctx.verify_mode = ssl.CERT_OPTIONAL if c.get("ui_mtls") else ssl.CERT_NONE
+    ui.conf, ui.ui = c, True
+    log(f"orchestrator {c['ctl_name']}: API 127.0.0.1:{c['api_port']}, UI 127.0.0.1:{c.get('ui_port', UI_PORT)} "
+        f"(behind nginx :443), project {c.get('project', '?')}")
+    C.serve(srv, a.workers or 2, in_parent=scheduler, extra=[ui])
 
 
 # --- CLI: setup -----------------------------------------------------------------------------------
@@ -325,6 +325,7 @@ def cmd_setup(a):
         c["public_ip"] = a.public_ip
     c.setdefault("public_ip", "")
     c.setdefault("api_port", 8443)
+    c.setdefault("ui_port", UI_PORT)
     if not c.get("rx_image") and not a.rx_image:
         vols = me.get("os-extended-volumes:volumes_attached") or []
         for v in vols:

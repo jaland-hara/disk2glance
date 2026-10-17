@@ -322,7 +322,7 @@ def cmd_serve(a):
               f"Stop it, detach the job volumes, start it again and run unique-boot.sh")
     srv = C.Server((conf.get("bind", "0.0.0.0"), conf["port"]), RxHandler)
     srv.ctx = C.server_ctx(f"{PKI}/rx.crt", f"{PKI}/rx.key", f"{PKI}/ca.crt")
-    srv.conf = conf
+    srv.conf, srv.ui = conf, False
     workers = a.workers or os.cpu_count() or 1
     total = multiprocessing.BoundedSemaphore(conf["max_inflight"])
     srv.limits = Limits(total, conf["max_per_job"])

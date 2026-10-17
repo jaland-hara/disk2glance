@@ -258,9 +258,10 @@ def server_ctx(cert, key, ca):
     return ctx
 
 
-def serve(srv, workers, before_fork=None, in_parent=None):
+def serve(srv, workers, before_fork=None, in_parent=None, extra=()):
     """Run srv in `workers` processes sharing the listening socket. in_parent(): background
-    work started in the parent only (threads do not survive fork)."""
+    work started in the parent only (threads do not survive fork). extra: more servers, run in
+    a thread of every process."""
     if before_fork:
         before_fork()
     kids = []
@@ -268,6 +269,8 @@ def serve(srv, workers, before_fork=None, in_parent=None):
         pid = os.fork()
         if pid == 0:
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            for x in extra:
+                threading.Thread(target=x.serve_forever, daemon=True).start()
             srv.serve_forever()
             os._exit(0)
         kids.append(pid)
@@ -282,6 +285,8 @@ def serve(srv, workers, before_fork=None, in_parent=None):
     signal.signal(signal.SIGTERM, stop)
     if in_parent:
         threading.Thread(target=in_parent, daemon=True).start()
+    for x in extra:
+        threading.Thread(target=x.serve_forever, daemon=True).start()
     srv.serve_forever()
 
 
