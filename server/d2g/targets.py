@@ -96,7 +96,8 @@ def egress_ips(cl, network, fip=None):
 
 
 def open_ctl_for(c, ips):
-    """443 on the orchestrator for remote receivers: rule in SG d2g-ctl if it is attached to it."""
+    """443 on the orchestrator for receivers: rule in SG d2g-ctl if it is attached to it.
+    ips: addresses, or "sg:<id>" for a security group of the home project."""
     from .cloud import Cloud
     from .setup import SG_CTL
     home = Cloud()
@@ -105,7 +106,7 @@ def open_ctl_for(c, ips):
         log(f"open 443 on the orchestrator for {', '.join(ips)} (security group {SG_CTL} is not attached)")
         return False
     home.ensure_sg(SG_CTL, "d2g orchestrator: 443 from administrators, sources and receivers",
-                   [("tcp", 443, f"{ip}/32") for ip in ips])
+                   [("tcp", 443, ip if ip.startswith("sg:") else f"{ip}/32") for ip in ips])
     return True
 
 

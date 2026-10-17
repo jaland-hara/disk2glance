@@ -10,10 +10,13 @@
 #
 # Usage:
 #   disk2rx --enroll --name NAME --server ctl.X.d2g --connect IP --pin 'sha256//…' --token T [--no-service]
-#   disk2rx [--check] [--threads N] [--disk /dev/vda] [--cow-mb N] [--keep-module]   one pass now
+#   disk2rx [--check] [--threads N] [--tcp-cc bbr|off] [--disk /dev/vda] [--cow-mb N] [--keep-module]   one pass now
 #   disk2rx --poll                    wait for commands from the orchestrator (disk2rx-agent.service)
 # The receiver address is picked from the job: its grey IP, its FIP or the orchestrator (SNI),
 # whichever answers first; the orchestrator can pin one per agent (d2g agent add --path).
+# For the pass the agent adds a host route to the receiver address with TCP BBR (--tcp-cc,
+# D2G_TCP_CC in d2g.env): on long lossy internet paths cubic stalls at a few MiB/s per connection.
+# Only traffic to that address is affected, the route is removed after the pass.
 set -euo pipefail
 PREFIX=${PREFIX:-/opt/disk2glance}
 export PATH=$PREFIX/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -24,6 +27,7 @@ PKIDIR=/etc/disk2glance/d2g
 UNIT=/etc/systemd/system/disk2rx-agent.service
 DISK=/dev/vda
 THREADS=
+TCP_CC=
 COW_MB=
 CHECK=0
 ENROLL=0
@@ -45,6 +49,7 @@ while [ $# -gt 0 ]; do
     --check) CHECK=1 ;;
     --disk) DISK=$2; shift ;;
     --threads) THREADS=$2; shift ;;
+    --tcp-cc) TCP_CC=$2; shift ;;
     --cow-mb) COW_MB=$2; shift ;;
     --keep-module) KEEP_MODULE=1 ;;
     -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
@@ -298,6 +303,7 @@ cleanup() {
   MINORS=()
   fb_remove
   discard_restore
+  cc_off
   if [ "$LOADED_BY_US" = 1 ] && [ "$KEEP_MODULE" = 0 ] && [ -e /proc/datto-info ]; then rmmod dattobd 2>/dev/null || log "WARN: rmmod dattobd failed"; LOADED_BY_US=0; fi
 }
 # --- COW files on the new VM ---------------------------------------------------------------
@@ -354,11 +360,34 @@ discard_restore() {
   if [ "$FSTRIM_STOPPED" = 1 ]; then systemctl start fstrim.timer && log "fstrim.timer resumed"; FSTRIM_STOPPED=0; fi
 }
 
+# --- TCP congestion control towards the receiver only ------------------------------------
+CC_ROUTE=
+cc_on() {
+  local want=${TCP_CC:-${D2G_TCP_CC:-bbr}} avail=/proc/sys/net/ipv4/tcp_available_congestion_control r gw dev
+  [ "$want" = off ] && return 0
+  grep -qw "$want" "$avail" 2>/dev/null || modprobe "tcp_$want" 2>/dev/null || true
+  grep -qw "$want" "$avail" 2>/dev/null || { log "TCP $want is not available in this kernel: system default"; return 0; }
+  [ "$(cat /proc/sys/net/ipv4/tcp_congestion_control)" = "$want" ] && return 0
+  r=$(ip -4 route show "$RX_ADDR/32" 2>/dev/null || true)
+  if [ -n "$r" ]; then   # ours from a killed run: reuse and remove; someone else's: leave it
+    grep -q "congctl $want" <<<"$r" && CC_ROUTE="$RX_ADDR/32" || log "route to $RX_ADDR exists: congestion control left as is"
+    return 0
+  fi
+  r=$(ip -4 route get "$RX_ADDR" 2>/dev/null | head -1 || true)
+  gw=$(sed -n 's/.* via \([0-9.]*\).*/\1/p' <<<"$r"); dev=$(sed -n 's/.* dev \([^ ]*\).*/\1/p' <<<"$r")
+  [ -n "$dev" ] || return 0
+  if ip route add "$RX_ADDR/32" ${gw:+via "$gw"} dev "$dev" congctl "$want" 2>/dev/null; then
+    CC_ROUTE="$RX_ADDR/32"; log "TCP $want towards $RX_ADDR only (host route, removed after the pass)"
+  fi
+}
+cc_off() { [ -n "$CC_ROUTE" ] && ip route del "$CC_ROUTE" 2>/dev/null; CC_ROUTE=; }
+
 trap cleanup EXIT
 trap 'log "signal received, cleaning up"; exit 130' INT TERM HUP
 next_minor() { local m=0; while [ -e "/dev/datto$m" ]; do m=$((m+1)); done; echo $m; }
 
 discard_off
+cc_on
 fb_install
 t0=$(date +%s); sync; log "sync before snapshots: $(( $(date +%s) - t0 )) s"
 COWOPT=(); [ -n "$COW_MB" ] && COWOPT=(-f "$COW_MB")

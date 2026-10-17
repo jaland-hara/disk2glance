@@ -69,6 +69,7 @@ curl -fsSL https://github.com/jaland-hara/disk2glance/releases/latest/download/d
 - [docs/s3-mode.md](docs/s3-mode.md): **экспериментальный перенос через S3** — многопоточная загрузка частями и сборка новой ВМ из S3, замеры и лимиты S3 VK.
 - [docs/orchestrator.md](docs/orchestrator.md): **вариант 2, инфраструктура d2g** — оркестратор и приёмники в целевом проекте, установка агента одной командой, перенос сразу в том, дельты, сборка ВМ.
 - [docs/receiver-mode.md](docs/receiver-mode.md): протокол передачи на приёмник, устройство приёмника, замеры.
+- [docs/speed-tests.md](docs/speed-tests.md): справочник замеров скорости — диски (тип, размер), Glance, S3, приёмник, каналы между площадками, BBR, multiqueue.
 - [docs/limitations.md](docs/limitations.md): ограничения, их причины и можно ли их снять.
 - [docs/build-modules.md](docs/build-modules.md): сборка модулей dattobd под новые ядра на сборочной ВМ.
 - [THIRD_PARTY.md](THIRD_PARTY.md): все сторонние компоненты, откуда взяты, как собраны, лицензии.

@@ -167,18 +167,20 @@ class Cloud:
         self.call("PUT", "network", f"/floatingips/{fid}", {"floatingip": {"port_id": None}})
 
     def ensure_sg(self, name, desc, rules):
-        """rules: [(proto, port, cidr)]; adds missing ones, keeps others."""
+        """rules: [(proto, port, cidr or "sg:<group id>")]; adds missing ones, keeps others."""
         sgs = self.call("GET", "network", f"/security-groups?name={urllib.parse.quote(name)}")["security_groups"]
         sg = sgs[0] if sgs else self.call("POST", "network", "/security-groups",
                                           {"security_group": {"name": name, "description": desc}})["security_group"]
-        have = {(r.get("protocol"), r.get("port_range_min"), r.get("remote_ip_prefix"))
+        have = {(r.get("protocol"), r.get("port_range_min"),
+                 f"sg:{r['remote_group_id']}" if r.get("remote_group_id") else r.get("remote_ip_prefix"))
                 for r in sg.get("security_group_rules", []) if r.get("direction") == "ingress"}
         for proto, port, cidr in rules:
             if (proto, port, cidr) in have:
                 continue
-            self.call("POST", "network", "/security-group-rules", {"security_group_rule": {
-                "security_group_id": sg["id"], "direction": "ingress", "ethertype": "IPv4", "protocol": proto,
-                "port_range_min": port, "port_range_max": port, "remote_ip_prefix": cidr}})
+            src = {"remote_group_id": cidr[3:]} if cidr.startswith("sg:") else {"remote_ip_prefix": cidr}
+            self.call("POST", "network", "/security-group-rules", {"security_group_rule": dict(
+                security_group_id=sg["id"], direction="ingress", ethertype="IPv4", protocol=proto,
+                port_range_min=port, port_range_max=port, **src)})
         return sg["id"]
 
 

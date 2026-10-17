@@ -548,10 +548,17 @@ def receiver_add(c, cl, az=None, flavor=None, fip=None, wait=True, target="home"
             cl.ensure_sg(RX_SG, "d2g receivers: 443 from the orchestrator and allowed sources",
                          [("tcp", 443, f"{c['public_ip']}/32")] + [("tcp", 443, x) for x in t["allow"]])
             T.open_ctl_for(c, T.egress_ips(cl, t["network"]))
+        else:
+            # the receiver joins and sends heartbeats to the orchestrator's grey address
+            sgs = cl.call("GET", "network", f"/security-groups?name={RX_SG}")["security_groups"]
+            if sgs:
+                T.open_ctl_for(c, [f"sg:{sgs[0]['id']}"])
         log(f"receiver {name} in {t['name']}: boot volume {t['rx_volume_gb']} GB {t['rx_volume_type']} from image {t['rx_image']}")
         vid = cl.create_volume(f"d2g-{name}-boot", t["rx_volume_gb"], t["rx_volume_type"], az, image=t["rx_image"],
                                meta={"d2g_receiver": name})
         cl.wait_vol(vid, "available")
+        # one NIC queue per vCPU (Nova reads image properties of a boot volume from the volume)
+        cl.vol_action(vid, {"os-set_image_metadata": {"metadata": {"hw_vif_multiqueue_enabled": "true"}}})
         sid = cl.create_server(f"d2g-{c['install_id']}-{name}", flavor, az, t["network"], vid, [RX_SG] + t["rx_sg"],
                                key=t["rx_key"] or None, user_data=user_data(c, name, tok, ctl_addr), delete_vol=True,
                                meta={"d2g_receiver": name, "d2g_install": c["install_id"]})
@@ -805,7 +812,7 @@ def cmd_job(a):
             cl = tcl
         ag = d.execute("SELECT inventory FROM agents WHERE name=?", (j["agent"],)).fetchone()
         inv = json.loads(ag["inventory"] or "{}") if ag else {}
-        props = {"os_type": "linux", "hw_vif_model": "virtio"}
+        props = {"os_type": "linux", "hw_vif_model": "virtio", "hw_vif_multiqueue_enabled": "true"}
         props.update({k: str(v) for k, v in (inv.get("props") or {}).items()})
         cl.vol_action(j["volume_id"], {"os-set_bootable": {"bootable": True}})
         cl.vol_action(j["volume_id"], {"os-set_image_metadata": {"metadata": props}})
