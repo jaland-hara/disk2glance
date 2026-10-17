@@ -40,7 +40,11 @@ case $ROLE in
 orch)
   if ! dpkg -s nginx-core libnginx-mod-stream >/dev/null 2>&1; then
     log "installing nginx (stream module)"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx-core libnginx-mod-stream >/dev/null
+    # fresh cloud images may carry stale package lists (404 on security updates): refresh and retry
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx-core libnginx-mod-stream >/dev/null 2>&1 || {
+      apt-get update -qq >/dev/null
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx-core libnginx-mod-stream >/dev/null
+    }
   fi
   rm -f /etc/nginx/sites-enabled/default
   [ -f /etc/nginx/d2g-stream.conf ] || : >/etc/nginx/d2g-stream.conf
