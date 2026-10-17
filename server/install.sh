@@ -1,6 +1,8 @@
 #!/bin/bash
 # Install the d2g server from this bundle (Ubuntu 22.04+/Debian 12+, Python 3.10+).
-#   ./install.sh --role orch [d2g setup options]   orchestrator: nginx (SNI on :443), d2g-orch.service, d2g setup
+#   ./install.sh --role orch [options]   orchestrator: nginx (SNI on :443), d2g-orch.service; without
+#                                        /etc/d2g/openrc it starts the web setup wizard (d2g bootstrap
+#                                        [--public-ip IP] [--ui-allow CIDR]), else runs d2g setup [options]
 #   ./install.sh --role rx                         receiver (run by cloud-init): unique-boot, join, d2g-rx.service
 #   ./install.sh --uninstall
 # Cloud credentials of the orchestrator: /etc/d2g/openrc (600), filled before 'd2g setup'.
@@ -49,14 +51,16 @@ orch)
   tar czf "/opt/d2g/pkg/d2g-server-$VER.tar.gz" -C "$(dirname "$B")" "$(basename "$B")"
   install -m 644 d2g-orch.service /etc/systemd/system/d2g-orch.service
   systemctl daemon-reload
-  if [ ! -s /etc/d2g/openrc ]; then
-    install -m 600 /dev/null /etc/d2g/openrc
-    log "fill /etc/d2g/openrc (OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_PROJECT_ID, OS_USER_DOMAIN_NAME, OS_REGION_NAME),"
-    log "then run: d2g setup [--public-ip IP] [--allow CIDR]... && systemctl enable --now d2g-orch"
+  install -m 644 d2g-rx.service /etc/systemd/system/d2g-rx.service
+  systemctl daemon-reload
+  if [ ! -s /etc/d2g/openrc ] && ! { [ -f /etc/d2g/orch.json ] && ! grep -q '"setup_mode": true' /etc/d2g/orch.json; }; then
+    # no cloud credentials yet: start in setup mode, the rest is done in the web wizard
+    d2g bootstrap "$@"
+    systemctl enable -q d2g-orch && systemctl restart d2g-orch
+    systemctl reload-or-restart nginx
     exit 0
   fi
   d2g setup "$@"
-  install -m 644 d2g-rx.service /etc/systemd/system/d2g-rx.service
   systemctl daemon-reload
   systemctl enable -q d2g-orch && systemctl restart d2g-orch
   if [ -f /etc/d2g/rx.json ]; then

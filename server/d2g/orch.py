@@ -305,6 +305,73 @@ def cmd_serve(a):
     C.serve(srv, a.workers or 2, in_parent=scheduler, extra=[ui])
 
 
+# --- CLI: first start without cloud credentials (the web setup wizard) ---------------------------------
+def md_get(key):
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://169.254.169.254/latest/meta-data/{key}", timeout=5) as r:
+            return r.read().decode().strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def new_setup_code(c):
+    code = secrets.token_hex(2) + "-" + secrets.token_hex(2) + "-" + secrets.token_hex(2)
+    c["setup_code"], c["setup_exp"] = h(code), now() + TOKEN_TTL
+    return code
+
+
+def cmd_bootstrap(a):
+    """Orchestrator without cloud credentials yet: CA, certificates, nginx, the web UI in setup
+    mode. Prints the wizard address and a one-time setup code (1 hour)."""
+    os.makedirs(C.ETC, mode=0o755, exist_ok=True)
+    os.makedirs(C.VAR, mode=0o700, exist_ok=True)
+    c = conf() if os.path.exists(CONF) else {}
+    if c and not c.get("setup_mode"):
+        die("already set up: use 'd2g setup' to change settings")
+    md = metadata()
+    c.setdefault("install_id", secrets.token_hex(3))
+    c.setdefault("domain", f"{c['install_id']}.d2g")
+    c["ctl_name"] = f"ctl.{c['domain']}"
+    c["server_id"], c["az"] = md["uuid"], md["availability_zone"]
+    c["grey_ip"] = md_get("local-ipv4")
+    c["public_ip"] = a.public_ip if a.public_ip is not None else md_get("public-ipv4")
+    c.setdefault("api_port", 8443)
+    c.setdefault("ui_port", UI_PORT)
+    # during setup the wizard is guarded by the one-time code; --ui-allow narrows it further
+    c["ui_allow"] = a.ui_allow or c.get("ui_allow") or ["0.0.0.0/0"]
+    c["setup_mode"] = True
+    code = new_setup_code(c)
+    C.ca_init(PKI, f"d2g CA {c['domain']}")
+    if not os.path.exists(f"{PKI}/ctl.crt"):
+        csr = C.new_key_csr(f"{PKI}/ctl.key", c["ctl_name"])
+        _, crt = C.sign_csr(PKI, csr, c["ctl_name"], "serverAuth", dns=[c["ctl_name"]], days=825)
+        with open(f"{PKI}/ctl.crt", "w") as f:
+            f.write(crt)
+    from . import ui
+    fp = ui.ui_cert(PKI, c)
+    C.save_json(CONF, c, 0o644)
+    db_init()
+    write_nginx(c)
+    addr = c["public_ip"] or c["grey_ip"]
+    print(f"""
+  d2g orchestrator {c['ctl_name']} is waiting for its setup.
+  Open    https://{addr}/setup   (grey address: https://{c['grey_ip']}/setup)
+  Code    {code}    (valid 1 hour, once; a new one: sudo d2g setup-code)
+  Check the certificate in the browser: SHA-256 {fp}
+  Allowed from: {' '.join(c['ui_allow'])}
+""")
+
+
+def cmd_setup_code(a):
+    c = conf()
+    if not c.get("setup_mode"):
+        die("the orchestrator is already set up")
+    code = new_setup_code(c)
+    C.save_json(CONF, c, 0o644)
+    print(f"setup code {code} (valid 1 hour)")
+
+
 # --- CLI: setup -----------------------------------------------------------------------------------
 def cmd_setup(a):
     os.makedirs(C.ETC, mode=0o755, exist_ok=True)
@@ -343,18 +410,18 @@ def cmd_setup(a):
     if a.rx_sg:
         c["rx_sg"] = a.rx_sg
     c.setdefault("rx_sg", [])
-    if a.allow:
-        c["allow"] = sorted(set(c.get("allow", []) + a.allow))
-    c.setdefault("allow", [])
-    if a.fip_pool:
-        c["fip_pool"] = sorted(set(c.get("fip_pool", []) + a.fip_pool))
-    c.setdefault("fip_pool", [])
+    # lists are added to, or with --replace-lists set exactly (the web UI sends whole lists)
+    for k, v in (("allow", a.allow), ("fip_pool", a.fip_pool), ("ui_allow", a.ui_allow)):
+        if a.replace_lists:
+            c[k] = sorted(set(v))
+        elif v:
+            c[k] = sorted(set(c.get(k, []) + v))
+        c.setdefault(k, [])
+    if a.max_volumes:
+        c["max_volumes"] = a.max_volumes
     c.setdefault("max_volumes", 20)
     c.setdefault("part_mb", 64)
     c.setdefault("vm_sg", ["default"])
-    if a.ui_allow:
-        c["ui_allow"] = sorted(set(c.get("ui_allow", []) + a.ui_allow))
-    c.setdefault("ui_allow", [])
     if a.ui_mtls:
         c["ui_mtls"] = a.ui_mtls == "on"
     c.setdefault("ui_mtls", False)
@@ -364,6 +431,9 @@ def cmd_setup(a):
         _, crt = C.sign_csr(PKI, csr, c["ctl_name"], "serverAuth", dns=[c["ctl_name"]], days=825)
         with open(f"{PKI}/ctl.crt", "w") as f:
             f.write(crt)
+    if a.finish_setup:
+        for k in ("setup_mode", "setup_code", "setup_exp", "setup_totp"):
+            c.pop(k, None)
     C.save_json(CONF, c, 0o644)
     db_init()
     if a.local_receiver:

@@ -174,7 +174,11 @@ def cloud_lists():
              "keypairs": sorted(k["keypair"]["name"] for k in cl.call("GET", "compute", "/os-keypairs")["keypairs"]),
              "volume_types": sorted(t["name"] for t in cl.call("GET", "volumev3", "/types")["volume_types"]),
              "zones": sorted(z["zoneName"] for z in cl.call("GET", "compute", "/os-availability-zone")["availabilityZoneInfo"]
-                             if z.get("zoneState", {}).get("available"))}
+                             if z.get("zoneState", {}).get("available")),
+             "fips": sorted(({"id": f["id"], "ip": f["floating_ip_address"], "free": not f.get("port_id")}
+                             for f in cl.call("GET", "network", "/floatingips")["floatingips"]), key=lambda f: f["ip"]),
+             "cloud": {k: cl.env.get(k, "") for k in ("OS_AUTH_URL", "OS_PROJECT_ID", "OS_USERNAME", "OS_USER_DOMAIN_NAME",
+                                                      "OS_REGION_NAME")}}
         _cloud_cache.update(t=time.time(), v=v)
         return v
 
@@ -230,7 +234,7 @@ STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; ch
 
 
 def handle(h, method, p):
-    c = h.server.conf
+    c = orch().conf()   # read every time: settings changed from the UI apply at once
     ip = h.peer_ip
     if not ip_allowed(ip, c.get("ui_allow") or []):
         h.drain()
@@ -241,6 +245,9 @@ def handle(h, method, p):
         if not cn or not cn.startswith("admin:"):
             h.drain()
             return h.reply(403, raw=b"admin certificate required\n", ctype="text/plain", headers=SEC_HEADERS)
+    if c.get("setup_mode"):
+        from . import setup
+        return setup.handle(h, method, p, c, ip)
     path = "/" + "/".join(p)
     if method == "GET" and (path in ("/", "/login") or path.startswith("/ui/")):
         name = {"/": "index.html", "/login": "login.html"}.get(path, path[4:])
@@ -277,7 +284,7 @@ def handle(h, method, p):
     if method == "POST" and path.startswith("/api/ui/"):
         b = h.body_json(limit=64 << 10)
         try:
-            return h.reply(200, action(who, p[2:], b), headers=SEC_HEADERS)
+            return h.reply(200, action(who, p[2:], b, ip), headers=SEC_HEADERS)
         except ValueError as ex:
             return h.reply(400, {"error": str(ex)}, headers=SEC_HEADERS)
     h.drain()
@@ -326,8 +333,54 @@ def need(b, key, rx=ARG_RE, optional=False):
     return v
 
 
-def action(who, p, b):
+def setup_argv(c, **kw):
+    """d2g setup with whole lists (--replace-lists): current settings, changed by kw."""
+    v = {k: c.get(k) for k in ("ui_allow", "allow", "fip_pool", "rx_flavor", "rx_volume_type", "max_volumes")} | kw
+    argv = ["setup", "--replace-lists", "--rx-flavor", v["rx_flavor"], "--rx-volume-type", v["rx_volume_type"],
+            "--max-volumes", str(int(v["max_volumes"]))]
+    for flag, key in (("--ui-allow", "ui_allow"), ("--allow", "allow"), ("--fip-pool", "fip_pool")):
+        for x in v[key] or []:
+            argv += [flag, x]
+    return argv
+
+
+def action(who, p, b, ip=""):
     """p: path after /api/ui/; returns JSON for the page."""
+    if p == ["settings", "access"]:
+        from .setup import cidr
+        ua = [cidr(x) for x in b.get("ui_allow") or []]
+        al = [cidr(x) for x in b.get("allow") or []]
+        if not ua:
+            raise ValueError("нужен хотя бы один адрес или подсеть для веб-интерфейса")
+        if not ip_allowed(ip, ua):
+            raise ValueError(f"вашего адреса {ip} нет в новом списке: вы закроете доступ себе")
+        rc, out = run_now(who, setup_argv(orch().conf(), ui_allow=ua, allow=al))
+        if rc:
+            raise ValueError(out[-1500:])
+        return {"message": "доступ обновлён"}
+    if p == ["settings", "receivers"]:
+        kw = {"rx_flavor": need(b, "rx_flavor"), "rx_volume_type": need(b, "rx_volume_type"),
+              "max_volumes": max(1, min(26, int(b.get("max_volumes") or 20))),
+              "fip_pool": [need({"f": x}, "f") for x in b.get("fip_pool") or []]}
+        rc, out = run_now(who, setup_argv(orch().conf(), **kw))
+        if rc:
+            raise ValueError(out[-1500:])
+        _cloud_cache["t"] = 0
+        return {"message": "параметры приёмников обновлены"}
+    if p == ["settings", "cloud"]:
+        from .setup import cloud_check, env_of
+        res = cloud_check(orch().conf(), b)
+        if b.get("save") and res["ok"]:
+            env = env_of(b)
+            import shlex
+            with open("/etc/d2g/openrc.new", "w") as f:
+                os.chmod("/etc/d2g/openrc.new", 0o600)
+                f.write("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()))
+            os.replace("/etc/d2g/openrc.new", "/etc/d2g/openrc")
+            orch().event(f"ui:{who}", f"cloud credentials changed (user {env['OS_USERNAME']}, project {env['OS_PROJECT_ID']})")
+            _cloud_cache["t"] = 0
+            res["saved"] = True
+        return res
     if p == ["agent", "add"]:
         name = need(b, "name", NAME_RE)
         path = b.get("path") or "auto"

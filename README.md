@@ -42,12 +42,21 @@
 Коротко (вариант 1, Glance): архив из [Releases](https://github.com/jaland-hara/disk2glance/releases) скопировать на исходную ВМ, затем
 
 ```bash
-tar xzf disk2glance-0.5.1.tar.gz && cd disk2glance-0.5.1
+tar xzf disk2glance-0.6.0.tar.gz && cd disk2glance-0.6.0
 sudo ./install.sh                         # создаст /etc/disk2glance/{openrc,props.json,disk2glance.conf}
 sudo vi /etc/disk2glance/openrc           # вписать учётные данные целевого облака
 sudo disk2glance --check                  # проверка без переноса
 sudo disk2glance --detach --name myvm-1   # перенос в фоне, лог: /var/log/disk2glance.log
 ```
+
+Коротко (вариант 2, оркестратор): на ВМ в целевом проекте
+
+```bash
+curl -fsSL https://github.com/jaland-hara/disk2glance/releases/latest/download/d2g-server-install.sh | sudo bash
+```
+
+и дальше — мастер настройки в браузере по адресу и коду, которые напечатает установщик
+([docs/orchestrator.md](docs/orchestrator.md#установка-оркестратора)).
 
 ## Документация
 

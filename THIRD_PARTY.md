@@ -15,6 +15,15 @@
 | `bin/jq` | jq 1.7.1, разбор JSON (Keystone/Glance API) | https://github.com/jqlang/jq/releases/tag/jq-1.7.1, файл `jq-linux-amd64` | скачан с официального релиза, sha256 сверен с `sha256sum.txt` релиза | MIT |
 | `src/dattobd/` | исходники dattobd того же тега | архив `https://github.com/datto/dattobd/archive/refs/tags/v0.12.2.tar.gz` | без изменений | GPL-2.0 / LGPL-2.1 |
 
+Серверный бандл `d2g-server-<версия>.tar.gz` (оркестратор и приёмник, вариант 2) написан на Python
+и использует только стандартную библиотеку. Из стороннего в нём одна библиотека:
+
+| Файл | Что это | Источник | Как получен | Лицензия |
+|---|---|---|---|---|
+| `d2g/static/vendor/qrcode.js` | QR Code Generator for JavaScript 1.4.4 (Kazuhiko Arase): QR-код для TOTP в мастере установки | https://www.npmjs.com/package/qrcode-generator, файл `qrcode.js` версии 1.4.4 | без изменений, лицензия в заголовке файла | MIT |
+
+На ВМ оркестратора из пакетов дистрибутива ставятся `nginx-core` и `libnginx-mod-stream` (BSD-2-Clause).
+
 Статические бинарники `dbdctl` и `update-img` содержат части glibc (LGPL-2.1). Исходники
 dattobd лежат в бандле (`src/dattobd`), исходники glibc 2.39 доступны в архиве Ubuntu
 (`apt-get source glibc` на Ubuntu 24.04), поэтому перелинковка возможна.
@@ -30,7 +39,7 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 У каждого модуля рядом лежит `dattobd.ko.sha256`. `install.sh` проверяет его и сверяет
 `vermagic` модуля с `uname -r`.
 
-### Готовые модули (бандл 0.5.1)
+### Готовые модули (бандл 0.6.0)
 
 | Ядро | Дистрибутив | Где собран | Пакеты для сборки (из репозиториев дистрибутива) |
 |---|---|---|---|

@@ -14,11 +14,13 @@ OPENRC = os.path.join(ETC, "openrc")
 
 
 class Cloud:
-    def __init__(self, openrc=OPENRC):
-        # openrc is a shell file (quoting, $'..' escapes): let bash parse it
-        out = subprocess.run(["bash", "-c", 'set -a; . "$1" >/dev/null; env -0', "_", openrc],
-                             capture_output=True, check=True).stdout.decode()
-        self.env = dict(x.split("=", 1) for x in out.split("\0") if x.startswith("OS_"))
+    def __init__(self, openrc=OPENRC, env=None):
+        if env is None:
+            # openrc is a shell file (quoting, $'..' escapes): let bash parse it
+            out = subprocess.run(["bash", "-c", 'set -a; . "$1" >/dev/null; env -0', "_", openrc],
+                                 capture_output=True, check=True).stdout.decode()
+            env = dict(x.split("=", 1) for x in out.split("\0") if x.startswith("OS_"))
+        self.env = env
         self.auth()
 
     def auth(self):
@@ -76,8 +78,9 @@ class Cloud:
         raise RuntimeError(f"volume {vid}: timeout waiting for {want}")
 
     def create_volume(self, name, gb, vtype, az, image=None, meta=None, desc=""):
-        v = {"size": gb, "volume_type": vtype, "availability_zone": az, "name": name, "description": desc,
-             "metadata": meta or {}}
+        v = {"size": gb, "availability_zone": az, "name": name, "description": desc, "metadata": meta or {}}
+        if vtype:
+            v["volume_type"] = vtype
         if image:
             v["imageRef"] = image
         return self.call("POST", "volumev3", "/volumes", {"volume": v})["volume"]["id"]

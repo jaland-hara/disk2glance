@@ -87,3 +87,30 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
   main { padding: 16px; }
   .kv { grid-template-columns: 1fr; }
 }
+/* setup wizard */
+.wiz { display: grid; grid-template-columns: 220px 1fr; gap: 20px; max-width: 1000px; }
+.steps { display: flex; flex-direction: column; gap: 2px; }
+.steps div { padding: 8px 12px; border-radius: 6px; color: var(--muted); }
+.steps div.on { background: var(--panel); color: var(--text); font-weight: 600; border: 1px solid var(--line); }
+.steps div.done { color: var(--ok); }
+.wpanel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px 22px; box-shadow: var(--shadow); min-width: 0; }
+.wpanel h2 { margin-bottom: 4px; }
+.wpanel .lead { color: var(--muted); margin: 0 0 16px; }
+.wnav { display: flex; justify-content: space-between; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.checklist { list-style: none; padding: 0; margin: 10px 0; }
+.checklist li { padding: 6px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 26px 1fr; gap: 4px; }
+.checklist li .d { grid-column: 2; color: var(--muted); font-size: 12px; word-break: break-word; }
+.ok-t { color: var(--ok); font-weight: 700; }
+.bad-t { color: var(--bad); font-weight: 700; }
+.qr { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin: 8px 0 12px; }
+.qr img { width: 180px; height: 180px; image-rendering: pixelated; background: #fff; padding: 8px; border-radius: 6px; border: 1px solid var(--line); }
+textarea { width: 100%; min-height: 70px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: 13px/1.4 var(--mono); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+.summary { display: grid; grid-template-columns: 200px 1fr; gap: 6px 14px; font-size: 13px; }
+.summary div:nth-child(odd) { color: var(--muted); }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 720px) { .wiz { grid-template-columns: 1fr; } .steps { flex-direction: row; overflow-x: auto; } .grid2, .summary { grid-template-columns: 1fr; } }
+.field input[type=checkbox], .checks input[type=checkbox] { width: auto; flex: none; }
+.field.checks label { display: flex; align-items: flex-start; gap: 8px; }
+.steps[hidden] + .wpanel { grid-column: 1 / -1; max-width: 560px; }

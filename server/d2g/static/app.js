@@ -131,7 +131,8 @@ function vLog() {
 }
 function vSettings() {
   const o = S.orchestrator, row = (k, v) => `<div>${esc(k)}</div><div>${v}</div>`;
-  return `<h2>Настройки</h2><div class="panel"><div class="kv">
+  return `<h2><span class="grow">Настройки</span><button class="btn" data-act="set-access">Изменить доступ</button>
+    <button class="btn" data-act="set-rx">Изменить приёмники</button><button class="btn" data-act="set-cloud">Учётка облака</button></h2><div class="panel"><div class="kv">
     ${row("Имя оркестратора", `<span class="mono">${esc(o.ctl_name)}</span>`)}
     ${row("Адреса", `серый <span class="mono">${esc(o.grey_ip)}</span>, публичный <span class="mono">${esc(o.public_ip || "—")}</span>`)}
     ${row("Зона, сеть", `${esc(o.az)}, ${esc(o.network)}`)}
@@ -141,7 +142,7 @@ function vSettings() {
     ${row("Веб-интерфейс доступен из", `<span class="mono">${esc((o.ui_allow || []).join(", "))}</span>`)}
     ${row("Сертификат администратора", o.ui_mtls ? "обязателен" : "не требуется")}
   </div></div>
-  <p class="small muted">Меняются командой на ВМ оркестратора: <span class="mono">d2g setup --allow CIDR --ui-allow CIDR --fip-pool ID --ui-mtls on|off</span>; администраторы — <span class="mono">d2g admin add|passwd|totp|cert ИМЯ</span>.</p>`;
+  <p class="small muted">Администраторы и сертификат администратора — на ВМ оркестратора: <span class="mono">d2g admin add|passwd|totp|cert ИМЯ</span>, <span class="mono">d2g setup --ui-mtls on|off</span>.</p>`;
 }
 const VIEWS = { overview: vOverview, agents: vAgents, jobs: vJobs, receivers: vReceivers, log: vLog, settings: vSettings };
 function render() {
@@ -167,6 +168,7 @@ function modal(title, body, buttons, onOk) {
   if (first) first.focus();
 }
 const close = () => { $("#modal").innerHTML = ""; };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#modal").firstChild) close(); });
 const sel = (id, opts, cur, empty) => `<select id="${id}">${empty !== undefined ? `<option value="">${esc(empty)}</option>` : ""}${opts.map((o) => `<option ${o === cur ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
 const val = (m, id) => m.querySelector("#" + id).value.trim();
 async function cloud() { if (!CLOUD) CLOUD = await api("/api/ui/cloud"); return CLOUD; }
@@ -242,6 +244,48 @@ async function addRx() {
     [{ text: "Отмена" }, { text: "Создать", cls: "primary", ok: true }],
     async (m) => { const r = await api("/api/ui/receiver/add", { az: val(m, "az"), flavor: val(m, "fl"), fip: val(m, "fip") }); close(); startTask(r, "Новый приёмник"); });
 }
+const lines = (t) => t.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+function setAccess() {
+  const o = S.orchestrator;
+  modal("Доступ", `<div class="field"><label>Веб-интерфейс открыт для</label><textarea id="ua">${esc((o.ui_allow || []).join("\n"))}</textarea>
+      <div class="hint">по одному адресу или подсети в строке; ваш текущий адрес должен остаться в списке</div></div>
+    <div class="field"><label>Исходные ВМ приходят с (443 на отдельных приёмниках)</label><textarea id="al">${esc((o.allow || []).join("\n"))}</textarea></div>
+    <p class="small muted">Группа безопасности самой ВМ оркестратора этой формой не меняется.</p>`,
+    [{ text: "Отмена" }, { text: "Сохранить", cls: "primary", ok: true }],
+    async (m) => { const r = await api("/api/ui/settings/access", { ui_allow: lines(m.querySelector("#ua").value), allow: lines(m.querySelector("#al").value) }); close(); toast(r.message); refresh(); });
+}
+async function setRx() {
+  const o = S.orchestrator, c = await cloud();
+  const fips = (c.fips || []).filter((f) => f.free || (o.fip_pool || []).includes(f.id));
+  modal("Отдельные приёмники", `<div class="field"><label>Флейвор</label><select id="fl">${c.flavors.map((f) => `<option value="${esc(f.name)}" ${f.name === o.rx_flavor ? "selected" : ""}>${esc(f.name)} — ${f.vcpus} vCPU, ${Math.round(f.ram / 1024)} ГБ</option>`).join("")}</select></div>
+    <div class="field"><label>Тип томов</label>${sel("vt", c.volume_types, o.rx_volume_type)}</div>
+    <div class="field"><label>Томов на приёмник</label><input id="mv" type="number" min="1" max="26" value="${esc(o.max_volumes)}"></div>
+    <div class="field"><label>Пул FIP для приёмников</label>${fips.length ? `<div class="checks">${fips.map((f) => `<label><input type="checkbox" value="${esc(f.id)}" ${(o.fip_pool || []).includes(f.id) ? "checked" : ""}>${esc(f.ip)}</label>`).join("")}</div>` : '<div class="small muted">свободных FIP в проекте нет</div>'}</div>`,
+    [{ text: "Отмена" }, { text: "Сохранить", cls: "primary", ok: true }],
+    async (m) => {
+      const r = await api("/api/ui/settings/receivers", { rx_flavor: val(m, "fl"), rx_volume_type: val(m, "vt"), max_volumes: +val(m, "mv"),
+        fip_pool: [...m.querySelectorAll(".checks input:checked")].map((x) => x.value) });
+      close(); CLOUD = null; toast(r.message); refresh();
+    });
+}
+async function setCloud() {
+  const cur = (await cloud()).cloud || {};
+  modal("Учётка облака", `<p class="small muted">Новая учётка проверяется (пробный том 1 ГБ и группа безопасности создаются и удаляются) и сохраняется, только если все проверки прошли.</p>
+    <div class="field"><label>Адрес Keystone</label><input id="u" value="${esc(cur.OS_AUTH_URL)}"></div>
+    <div class="field"><label>ID проекта</label><input id="pr" class="mono" value="${esc(cur.OS_PROJECT_ID)}"></div>
+    <div class="field"><label>Регион</label><input id="rg" value="${esc(cur.OS_REGION_NAME)}"></div>
+    <div class="field"><label>Пользователь</label><input id="un" value="${esc(cur.OS_USERNAME)}" autocomplete="off"></div>
+    <div class="field"><label>Домен пользователя</label><input id="dm" value="${esc(cur.OS_USER_DOMAIN_NAME || "service-users")}"></div>
+    <div class="field"><label>Пароль</label><input id="pw" type="password" autocomplete="off"></div><div id="res"></div>`,
+    [{ text: "Отмена" }, { text: "Проверить и сохранить", cls: "primary", ok: true }],
+    async (m) => {
+      m.querySelector("#res").innerHTML = '<p class="small muted">проверяю…</p>';
+      const r = await api("/api/ui/settings/cloud", { auth_url: val(m, "u"), project_id: val(m, "pr"), region: val(m, "rg"), username: val(m, "un"),
+        user_domain: val(m, "dm"), password: m.querySelector("#pw").value, save: true });
+      m.querySelector("#res").innerHTML = `<ul class="small">${r.checks.map((x) => `<li>${x.ok ? "✓" : "✗"} ${esc(x.name)} <span class="muted">${esc(x.detail)}</span></li>`).join("")}</ul>`;
+      if (r.saved) { CLOUD = null; toast("Учётка облака сохранена"); setTimeout(close, 1500); } else throw new Error("Не все проверки прошли, учётка не сохранена");
+    });
+}
 function confirmAct(title, text, okText, fn) {
   modal(title, `<p>${text}</p>`, [{ text: "Отмена" }, { text: okText, cls: "primary", ok: true }], async () => { const r = await fn(); close(); startTask(r, title); });
 }
@@ -265,6 +309,9 @@ document.addEventListener("click", (e) => {
   if (a === "job-finish") return run(finishJob(id));
   if (a === "job-delete") return confirmAct(`Удалить задание ${id}`, "Том будет отключён от приёмника и удалён вместе с перенесёнными данными. Исходная ВМ не меняется.", "Удалить", () => api(`/api/ui/job/${id}/delete`, {}));
   if (a === "rx-add") return run(addRx());
+  if (a === "set-access") return setAccess();
+  if (a === "set-rx") return run(setRx());
+  if (a === "set-cloud") return run(setCloud());
   if (a === "rx-delete") return confirmAct(`Удалить приёмник ${name}`, "ВМ приёмника будет удалена, её FIP вернётся в пул.", "Удалить", () => api(`/api/ui/receiver/${name}/delete`, {}));
 });
 

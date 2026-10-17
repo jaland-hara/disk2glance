@@ -1,6 +1,8 @@
 """d2g — orchestrator and receiver for live disk transfers into Cinder volumes.
 
 Orchestrator (one VM per client project, installed with install.sh --role orch):
+  d2g bootstrap [--public-ip IP] [--ui-allow CIDR]     first start without cloud credentials: web setup wizard
+  d2g setup-code                                       a new one-time code for the wizard
   d2g setup [--no-local-receiver] [--public-ip IP] [--ui-allow CIDR]... [--ui-mtls on|off] [--allow CIDR]... [--fip-pool ID]... [--rx-flavor F] [--rx-key K] [--rx-sg SG]...
   d2g status
   d2g admin add|passwd|totp [--off]|delete|cert NAME | list        web UI administrators
@@ -38,6 +40,13 @@ def main():
                    help="do not run a receiver on the orchestrator VM (receivers only on separate VMs)")
     p.add_argument("--ui-allow", action="append", default=[], help="CIDR allowed to open the web UI")
     p.add_argument("--ui-mtls", choices=["on", "off"], help="require an admin client certificate for the web UI")
+    p.add_argument("--replace-lists", action="store_true", help="--allow/--fip-pool/--ui-allow replace the lists")
+    p.add_argument("--max-volumes", type=int, help="volumes per receiver")
+    p.add_argument("--finish-setup", action="store_true", help=argparse.SUPPRESS)
+    p = sp.add_parser("bootstrap")
+    p.add_argument("--public-ip")
+    p.add_argument("--ui-allow", action="append", default=[])
+    sp.add_parser("setup-code")
     sp.add_parser("status")
     p = sp.add_parser("admin")
     p.add_argument("op", choices=["add", "list", "passwd", "totp", "delete", "cert"])
@@ -101,8 +110,10 @@ def main():
         {"rx-join": recv.cmd_join, "rx-serve": recv.cmd_serve, "rx-status": recv.cmd_status}[a.cmd](a)
         return
     from . import orch
-    if a.cmd != "setup" and not os.path.exists(orch.CONF):
+    if a.cmd not in ("setup", "bootstrap") and not os.path.exists(orch.CONF):
         C.die("not set up: run 'd2g setup' first")
+    if a.cmd in ("bootstrap", "setup-code"):
+        return {"bootstrap": orch.cmd_bootstrap, "setup-code": orch.cmd_setup_code}[a.cmd](a)
     if a.cmd == "admin":
         from . import ui
         orch.db_init()
