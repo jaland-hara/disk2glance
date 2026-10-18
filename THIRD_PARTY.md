@@ -36,8 +36,7 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5  bin/jq
 ```
 
-Рядом с каждым модулем находится `dattobd.ko.sha256`.
- `install.sh` проверяет его и сверяет
+Рядом с каждым модулем находится `dattobd.ko.sha256`. `install.sh` проверяет его и сверяет
 `vermagic` модуля с `uname -r`.
 
 ### Готовые модули в бандле
