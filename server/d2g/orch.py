@@ -711,6 +711,7 @@ def pick_receiver(c, t, az, name=None):
     if name:
         r = db().execute("SELECT * FROM receivers WHERE name=?", (name,)).fetchone() or die("no such receiver")
         (r["target"] or "home") == where or die(f"receiver {name} is in {r['target']}, the job needs one in {where}")
+        r["az"] == az or die(f"receiver {name} is in zone {r['az']}, the job volume is in {az}: one receiver per zone")
         rx_up(r) or die(f"receiver {name} is not up")
         return r
     for r in db().execute("SELECT * FROM receivers WHERE az=? AND state='up' AND coalesce(target,'home')=? "
@@ -759,7 +760,8 @@ def cmd_job(a):
         t = T.tconf(c, a.target)
         where = T.volume_owner(t)
         cl = T.cloud_for(where)
-        az = a.az or (t["az"] if where != "home" else c["az"])
+        rz = a.receiver and not a.az and d.execute("SELECT az FROM receivers WHERE name=?", (a.receiver,)).fetchone()
+        az = a.az or (rz and rz["az"]) or (t["az"] if where != "home" else c["az"])   # a named receiver brings its zone
         r = pick_receiver(c, t, az, a.receiver)
         gb = max(a.size_gb or 0, (disk + 2**30 - 1) // 2**30)
         jid = "j" + secrets.token_hex(4)

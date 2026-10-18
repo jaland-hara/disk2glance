@@ -10,7 +10,7 @@ Orchestrator (one VM per client project, installed with install.sh --role orch):
   d2g target list | check NAME | delete NAME           other projects VMs can be moved into
   d2g receiver add [--target T] [--az AZ] [--flavor F] [--fip ID|auto] [--no-wait] | list | delete NAME
   d2g agent add NAME [--path auto|rx-grey|rx-fip|ctl|ctl-grey] [--threads N] | list | revoke | sync | uninstall NAME
-  d2g job new AGENT [--target T] [--receiver rxN] [--type T] [--every SEC] [--no-start] | list | show | sync [--every SEC] JOB
+  d2g job new AGENT [--target T] [--az AZ] [--receiver rxN] [--type T] [--every SEC] [--no-start] | list | show | sync [--every SEC] JOB
   d2g job finish JOB --flavor F [--network N] [--sg S]... [--key K] [--name VM] | delete JOB [--keep-volume]
 Receiver (created by the orchestrator, cloud-init runs install.sh --role rx):
   d2g rx-join | rx-serve | rx-status
