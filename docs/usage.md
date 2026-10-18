@@ -77,9 +77,9 @@ sudo /opt/disk2glance/install.sh --uninstall [--purge]
 **Онлайн** (архив загружается на исходную ВМ по сети):
 
 ```bash
-R=https://github.com/jaland-hara/disk2glance/releases/download/v0.6.0
+R=https://github.com/jaland-hara/disk2glance/releases/download/v0.7.0
 curl -fsSL $R/install.sh -o /tmp/d2g-install.sh
-sudo D2G_BUNDLE_URL=$R/disk2glance-0.6.0.tar.gz bash /tmp/d2g-install.sh
+sudo D2G_BUNDLE_URL=$R/disk2glance-0.7.0.tar.gz bash /tmp/d2g-install.sh
 ```
 
 Если рядом с архивом опубликован `<архив>.sha256`, установщик сверяет контрольную сумму.

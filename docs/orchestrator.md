@@ -104,7 +104,7 @@ curl -fsSL https://github.com/jaland-hara/disk2glance/releases/latest/download/d
   Check the certificate in the browser: SHA-256 2F:F9:33:…:60:1E
 ```
 
-Параметры (после `sudo bash -s --`): `--version 0.6.0` (по умолчанию последний релиз),
+Параметры (после `sudo bash -s --`): `--version 0.7.0` (по умолчанию последний релиз),
 `--bundle FILE` (установка из скачанного архива, без интернета), `--public-ip IP`, `--ui-allow CIDR`
 (ограничить адреса, с которых открывается мастер; по умолчанию — с любых адресов, но только с кодом).
 
@@ -125,7 +125,7 @@ curl -fsSL https://github.com/jaland-hara/disk2glance/releases/latest/download/d
 ### Вручную, без мастера
 
 ```bash
-tar xzf d2g-server-0.6.0.tar.gz && cd d2g-server-0.6.0
+tar xzf d2g-server-0.7.0.tar.gz && cd d2g-server-0.7.0
 sudo install -d /etc/d2g && sudo install -m 600 openrc /etc/d2g/openrc   # учётная запись проекта
 sudo ./install.sh --role orch --public-ip <FIP> --allow 10.0.0.0/8 --ui-allow <адрес администратора>/32
 sudo d2g admin add admin

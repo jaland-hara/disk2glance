@@ -1,7 +1,7 @@
 #!/bin/bash
 # One-command install of the d2g orchestrator (Ubuntu 22.04+/Debian 12+ VM in the target project):
 #   curl -fsSL https://github.com/jaland-hara/disk2glance/releases/latest/download/d2g-server-install.sh | sudo bash
-#   ... | sudo bash -s -- [--version 0.6.0] [--bundle FILE] [--public-ip IP] [--ui-allow CIDR]...
+#   ... | sudo bash -s -- [--version 0.7.0] [--bundle FILE] [--public-ip IP] [--ui-allow CIDR]...
 # Downloads d2g-server-<version>.tar.gz from GitHub Releases, checks its SHA-256 and runs
 # install.sh --role orch. Without cloud credentials it starts the web setup wizard and prints its
 # address, a one-time code and the certificate fingerprint.
