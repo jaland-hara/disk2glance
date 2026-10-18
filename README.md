@@ -66,7 +66,7 @@ disk2glance копирует диск виртуальной машины в о�
   выполнить
 
   ```bash
-  tar xzf disk2glance-0.8.1.tar.gz && cd disk2glance-0.8.1
+  tar xzf disk2glance-0.8.2.tar.gz && cd disk2glance-0.8.2
   sudo ./install.sh                         # создаст /etc/disk2glance/{openrc,props.json,disk2glance.conf}
   sudo vi /etc/disk2glance/openrc           # вписать учётные данные целевого облака
   sudo disk2glance --check                  # проверка без переноса
@@ -130,6 +130,7 @@ disk2glance копирует диск виртуальной машины в о�
 | Архитектура | x86_64 |
 | Файловые системы | ext3, ext4, xfs — на разделах или на линейных томах LVM |
 | Проверенные ОС | Ubuntu 22.04 и 24.04, RED OS 7.3 и 8, CentOS 7.9, Astra Linux SE 1.7 и 1.8 |
+| Есть готовые модули, проверены снапшоты | AlmaLinux 8.10, 9.8 и 10.2 (с 0.8.2; полный перенос на этих ОС ещё не проверялся) |
 | Откуда переносили | VK Cloud (другой проект и другой регион), Яндекс Облако, Cloud.ru |
 | С других гипервизоров | VMware, Hyper-V, Xen — после подготовки по [guest-drivers.md](docs/guest-drivers.md) |
 | Не поддерживается | Windows, btrfs, mdraid, dm-crypt — см. [limitations.md](docs/limitations.md) |

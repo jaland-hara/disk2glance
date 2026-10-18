@@ -76,21 +76,21 @@ lsblk -f          # разделы и файловые системы
 **А. Загрузка с GitHub прямо на исходную ВМ:**
 
 ```bash
-curl -fsSLO https://github.com/jaland-hara/disk2glance/releases/download/v0.8.1/disk2glance-0.8.1.tar.gz
+curl -fsSLO https://github.com/jaland-hara/disk2glance/releases/download/v0.8.2/disk2glance-0.8.2.tar.gz
 ```
 
-**Б. Без интернета на исходной ВМ:** скачайте `disk2glance-0.8.1.tar.gz` со страницы
+**Б. Без интернета на исходной ВМ:** скачайте `disk2glance-0.8.2.tar.gz` со страницы
 [Releases](https://github.com/jaland-hara/disk2glance/releases) на свой компьютер и скопируйте:
 
 ```bash
-scp disk2glance-0.8.1.tar.gz root@<исходная-ВМ>:/root/
+scp disk2glance-0.8.2.tar.gz root@<исходная-ВМ>:/root/
 ```
 
 Распакуйте и установите:
 
 ```bash
-tar xzf disk2glance-0.8.1.tar.gz
-cd disk2glance-0.8.1
+tar xzf disk2glance-0.8.2.tar.gz
+cd disk2glance-0.8.2
 sudo ./install.sh
 ```
 
