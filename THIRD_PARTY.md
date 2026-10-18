@@ -53,12 +53,9 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 | `6.1.175-1.el7.3.x86_64` | RED OS 7.3 | на сборочной ВМ RED OS 7.3, запущенное ядро; набор и исправление `WRITE_ZEROES` проверены | `gcc`, `make`, `elfutils-libelf-devel`, `kernel-lt-devel-6.1.175-1.el7.3` — репозитории RED OS (`base`, `updates`, `kernels6`) |
 | `6.1.180-1.el7.3.x86_64` | RED OS 7.3 | там же, кросс-сборка | то же + `kernel-lt-devel-6.1.180-1.el7.3` |
 | `6.1.50-1-generic` | Astra Linux SE 1.7.5 | на сборочной ВМ Astra 1.7.5, запущенное ядро; набор и исправление `WRITE_ZEROES` проверены | `build-essential`, `libelf-dev`, `linux-headers-6.1.50-1-generic` — замороженный репозиторий Astra 1.7.5 (`download.astralinux.ru/astra/frozen/1.7_x86-64/1.7.5/repository-base`) |
+| `6.1.158-1-generic` | Astra Linux SE 1.8.5 | на сборочной ВМ Astra 1.8.5 (образ VK `alse-1.8.5-base`), запущенное ядро; набор и исправление `WRITE_ZEROES` проверены | `build-essential` (gcc 12), `libelf-dev`, `linux-headers-6.1.158-1-generic` — замороженный репозиторий Astra 1.8.5 (`download.astralinux.ru/astra/frozen/1.8_x86-64/1.8.5/main-repository`) |
+| `6.1.166-1-generic` | Astra Linux SE 1.8.6 | на той же ВМ после установки ядра 1.8.6, запущенное ядро; набор и исправление `WRITE_ZEROES` проверены | то же + `linux-image-6.1.166-1-generic`, `linux-headers-6.1.166-1-generic` — замороженный репозиторий Astra 1.8.6 (`…/1.8_x86-64/1.8.6/main-repository`) |
 | `3.10.0-1160.119.1.el7.x86_64` | CentOS 7.9 | на сборочной ВМ CentOS 7, запущенное ядро; механизм набора проверен | `gcc`, `make`, `elfutils-libelf-devel`, `kernel-devel-3.10.0-1160.119.1.el7` — репозитории CentOS 7 (`updates`, vault.centos.org) |
-
-Готового модуля для Astra Linux SE 1.8.6 (`6.1.166-1-generic`) в 0.8.0 нет: модуль 0.7.0 содержал
-ошибку `WRITE_ZEROES`, а это ядро собрано gcc 12, которого нет на сборочной ВМ Astra 1.7. На
-Astra 1.8 модуль собирается на исходной ВМ: `install.sh --build` (нужны `build-essential`,
-`libelf-dev` и `linux-headers-$(uname -r)`), из исходников бандла с обеими доработками.
 
 Модули подписаны локальными ключами DKMS сборочных ВМ, но `strip` удаляет подпись. При
 выключенном Secure Boot это не важно. При включённом модуль нужно подписать ключом, который
