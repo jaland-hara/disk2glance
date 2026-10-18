@@ -388,6 +388,12 @@ next_minor() { local m=0; while [ -e "/dev/datto$m" ]; do m=$((m+1)); done; echo
 
 discard_off
 cc_on
+# a COW file left by a pass interrupted by a reboot: our stale snapshots are destroyed above and we
+# hold the lock, so nothing uses it now
+for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
+  read -r tdev tmnt <<<"$t"; f="${tmnt%/}/$COW"
+  [ -e "$f" ] && { chattr -i "$f" 2>/dev/null; rm -f "$f" && log "removed $f left by an interrupted pass"; }
+done
 fb_install
 t0=$(date +%s); sync; log "sync before snapshots: $(( $(date +%s) - t0 )) s"
 COWOPT=(); [ -n "$COW_MB" ] && COWOPT=(-f "$COW_MB")
