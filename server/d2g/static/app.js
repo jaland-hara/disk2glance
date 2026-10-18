@@ -132,7 +132,7 @@ function vLog() {
 function vSettings() {
   const o = S.orchestrator, row = (k, v) => `<div>${esc(k)}</div><div>${v}</div>`;
   return `<h2><span class="grow">Настройки</span><button class="btn" data-act="set-access">Изменить доступ</button>
-    <button class="btn" data-act="set-rx">Изменить приёмники</button><button class="btn" data-act="set-cloud">Учётка облака</button></h2><div class="panel"><div class="kv">
+    <button class="btn" data-act="set-rx">Изменить приёмники</button><button class="btn" data-act="set-cloud">Учётная запись облака</button></h2><div class="panel"><div class="kv">
     ${row("Имя оркестратора", `<span class="mono">${esc(o.ctl_name)}</span>`)}
     ${row("Адреса", `серый <span class="mono">${esc(o.grey_ip)}</span>, публичный <span class="mono">${esc(o.public_ip || "—")}</span>`)}
     ${row("Зона, сеть", `${esc(o.az)}, ${esc(o.network)}`)}
@@ -147,7 +147,7 @@ function vSettings() {
 function vTargets() {
   const cnt = (name, list, f) => list.filter((x) => (x.target || "home") === name && f(x)).length;
   return `<h2><span class="grow">Проекты</span><button class="btn primary" data-act="tg-add">Добавить проект</button></h2>
-  <div class="panel"><table><tr><th>Проект</th><th>Способ</th><th>ID проекта · регион</th><th>Зона, сеть</th><th class="num">Приёмники</th><th class="num">Задания</th><th>Учётка</th><th></th></tr>` +
+  <div class="panel"><table><tr><th>Проект</th><th>Способ</th><th>ID проекта · регион</th><th>Зона, сеть</th><th class="num">Приёмники</th><th class="num">Задания</th><th>Учётная запись</th><th></th></tr>` +
     S.targets.map((t) => `<tr><td><b>${esc(t.name === "home" ? "этот проект" : t.title || t.name)}</b><div class="small muted mono">${esc(t.name)}</div></td>
       <td>${badge(MODE, t.mode)}</td><td class="small mono">${esc(t.project || "")}<div class="muted">${esc(t.region || "")}</div></td>
       <td class="small">${esc(t.az || "—")}<div class="muted">${esc(t.network || "—")}</div></td>
@@ -155,8 +155,8 @@ function vTargets() {
       <td>${t.name === "home" ? '<span class="small muted">в «Настройках»</span>' : t.check_ok ? `<span class="badge ok">проверена</span><div class="small muted">${ago(t.checked_at)}</div>` : '<span class="badge bad">проверка не прошла</span>'}</td>
       <td>${t.name === "home" ? "" : `<div class="actions"><button class="btn" data-act="tg-edit" data-name="${esc(t.name)}">Изменить</button>
         <button class="btn danger" data-act="tg-delete" data-name="${esc(t.name)}">Удалить</button></div>`}</td></tr>`).join("") + `</table></div>
-  <p class="small muted"><b>Передача тома</b> — диск принимается в проекте оркестратора, а при «Создать ВМ» том передаётся в проект и ВМ создаётся там; нужна только служебная учётка проекта, работает в пределах одного региона.
-  <b>Свой приёмник</b> — оркестратор создаёт приёмник внутри проекта (учёткой проекта), диск туда и принимается; подходит для другого региона и когда данные не должны появляться в проекте оркестратора. Приёмник ходит к оркестратору по его публичному адресу, агенты — к приёмнику по серому адресу или его FIP.</p>`;
+  <p class="small muted"><b>Передача тома</b> — диск принимается в проекте оркестратора, а при «Создать ВМ» том передаётся в проект и ВМ создаётся там; нужна только служебная учётная запись проекта, работает в пределах одного региона.
+  <b>Свой приёмник</b> — оркестратор создаёт приёмник внутри проекта (учётной записью проекта), диск туда и принимается; подходит для другого региона и когда данные не должны появляться в проекте оркестратора. Приёмник ходит к оркестратору по его публичному адресу, агенты — к приёмнику по серому адресу или его FIP.</p>`;
 }
 async function editTarget(name) {
   const t = name ? tgt(name) : { name: "", title: "", mode: "transfer", allow: [], fip_pool: [], vm_sg: ["default"] };
@@ -169,12 +169,12 @@ async function editTarget(name) {
     <div class="field"><label>Адрес Keystone</label><input id="u" value="${esc(home.OS_AUTH_URL || "https://infra.mail.ru:35357/v3/")}"></div>
     <div class="grid2"><div class="field"><label>ID проекта</label><input id="pr" class="mono" value="${esc(t.project || "")}"></div>
       <div class="field"><label>Регион</label><input id="rg" value="${esc(t.region || home.OS_REGION_NAME || "RegionOne")}"></div></div>
-    <div class="grid2"><div class="field"><label>Служебная учётка</label><input id="un" autocomplete="off"></div>
+    <div class="grid2"><div class="field"><label>Служебная учётная запись</label><input id="un" autocomplete="off"></div>
       <div class="field"><label>Домен</label><input id="dm" value="service-users"></div></div>
-    <div class="field"><label>Пароль</label><input id="pw" type="password" autocomplete="off" placeholder="${name ? "пусто — учётка не меняется" : ""}"></div>
-    <button class="btn" id="tchk">Проверить учётку</button> <span id="tchs" class="small muted"></span><div id="tres"></div><div id="tset"></div>`;
+    <div class="field"><label>Пароль</label><input id="pw" type="password" autocomplete="off" placeholder="${name ? "пусто — учётная запись не меняется" : ""}"></div>
+    <button class="btn" id="tchk">Проверить учётную запись</button> <span id="tchs" class="small muted"></span><div id="tres"></div><div id="tset"></div>`;
   modal(name ? `Проект ${t.title || name}` : "Добавить проект", creds, [{ text: "Отмена" }, { text: "Сохранить", cls: "primary", ok: true }], async (m) => {
-    if (!lists) throw new Error("Сначала проверьте учётку");
+    if (!lists) throw new Error("Сначала проверьте учётную запись");
     const mode = val(m, "tm"), q = (id) => (m.querySelector("#" + id) ? val(m, id) : "");
     const body = { name: val(m, "tn"), title: val(m, "tt"), mode, auth_url: val(m, "u"), project_id: val(m, "pr"), region: val(m, "rg"),
       username: val(m, "un"), user_domain: val(m, "dm"), password: m.querySelector("#pw").value, az: q("taz"), network: q("tnet"),
@@ -356,7 +356,7 @@ async function setRx() {
 }
 async function setCloud() {
   const cur = (await cloud()).cloud || {};
-  modal("Учётка облака", `<p class="small muted">Новая учётка проверяется (пробный том 1 ГБ и группа безопасности создаются и удаляются) и сохраняется, только если все проверки прошли.</p>
+  modal("Учётная запись облака", `<p class="small muted">Новая учётная запись проверяется (пробный том 1 ГБ и группа безопасности создаются и удаляются) и сохраняется, только если все проверки прошли.</p>
     <div class="field"><label>Адрес Keystone</label><input id="u" value="${esc(cur.OS_AUTH_URL)}"></div>
     <div class="field"><label>ID проекта</label><input id="pr" class="mono" value="${esc(cur.OS_PROJECT_ID)}"></div>
     <div class="field"><label>Регион</label><input id="rg" value="${esc(cur.OS_REGION_NAME)}"></div>
@@ -369,7 +369,7 @@ async function setCloud() {
       const r = await api("/api/ui/settings/cloud", { auth_url: val(m, "u"), project_id: val(m, "pr"), region: val(m, "rg"), username: val(m, "un"),
         user_domain: val(m, "dm"), password: m.querySelector("#pw").value, save: true });
       m.querySelector("#res").innerHTML = `<ul class="small">${r.checks.map((x) => `<li>${x.ok ? "✓" : "✗"} ${esc(x.name)} <span class="muted">${esc(x.detail)}</span></li>`).join("")}</ul>`;
-      if (r.saved) { CLOUD = {}; toast("Учётка облака сохранена"); setTimeout(close, 1500); } else throw new Error("Не все проверки прошли, учётка не сохранена");
+      if (r.saved) { CLOUD = {}; toast("Учётная запись облака сохранена"); setTimeout(close, 1500); } else throw new Error("Не все проверки прошли, учётная запись не сохранена");
     });
 }
 function confirmAct(title, text, okText, fn) {
@@ -397,7 +397,7 @@ document.addEventListener("click", (e) => {
   if (a === "rx-add") return run(addRx());
   if (a === "tg-add") return run(editTarget());
   if (a === "tg-edit") return run(editTarget(name));
-  if (a === "tg-delete") return confirmAct(`Удалить проект ${name}`, "Оркестратор забудет проект и удалит его учётку. Приёмников и незавершённых заданий в проекте быть не должно; ВМ в проекте не трогаются.", "Удалить", () => api(`/api/ui/target/${name}/delete`, {}));
+  if (a === "tg-delete") return confirmAct(`Удалить проект ${name}`, "Оркестратор забудет проект и удалит его учётную запись. Приёмников и незавершённых заданий в проекте быть не должно; ВМ в проекте не трогаются.", "Удалить", () => api(`/api/ui/target/${name}/delete`, {}));
   if (a === "set-access") return setAccess();
   if (a === "set-rx") return run(setRx());
   if (a === "set-cloud") return run(setCloud());

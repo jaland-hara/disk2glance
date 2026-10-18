@@ -505,7 +505,7 @@ def target_save(who, b):
             f.write("".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items()))
         argv += ["--openrc", tmp]
     elif not exists:
-        raise ValueError("нужен пароль служебной учётки проекта")
+        raise ValueError("нужен пароль служебной учётной записи проекта")
     if b.get("title"):
         argv += ["--title", str(b["title"])[:64]]
     for k in ("az", "network", "rx_flavor", "rx_volume_type", "rx_key"):

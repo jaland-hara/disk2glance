@@ -99,7 +99,7 @@ function page2() {
   $("#page").innerHTML = `<h2>Облако</h2><p class="lead">Сервисная учётная запись проекта, в который переносятся ВМ. Она хранится только на этой ВМ (<span class="mono">/etc/d2g/openrc</span>, права 600) и на исходные ВМ не попадает.</p>
     ${field("Адрес Keystone", `<input id="u" value="${esc(c.auth_url)}">`)}
     <div class="grid2">${field("ID проекта", `<input id="pr" class="mono" value="${esc(c.project_id)}">`)}${field("Регион", `<input id="rg" value="${esc(c.region)}">`)}</div>
-    <div class="grid2">${field("Пользователь", `<input id="un" value="${esc(c.username)}" autocomplete="off">`)}${field("Домен пользователя", `<input id="dm" value="${esc(c.user_domain)}">`, "сервисные учётки VK Cloud: service-users")}</div>
+    <div class="grid2">${field("Пользователь", `<input id="un" value="${esc(c.username)}" autocomplete="off">`)}${field("Домен пользователя", `<input id="dm" value="${esc(c.user_domain)}">`, "сервисные учётной записи VK Cloud: service-users")}</div>
     ${field("Пароль", `<input id="pw" type="password" autocomplete="off" value="${esc(c.password)}">`)}
     <button class="btn" id="chk">Проверить</button> <span id="chs"></span>
     <div id="res">${ch ? checks(ch) : ""}</div><div class="err" id="err"></div>${nav(true, true)}`;
@@ -123,7 +123,7 @@ function page2() {
 }
 function checks(ch) {
   return `<ul class="checklist">${ch.checks.map((x) => `<li><span class="${x.ok ? "ok-t" : "bad-t"}">${x.ok ? "✓" : "✗"}</span><span>${esc(x.name)}</span><span class="d">${esc(x.detail)}</span></li>`).join("")}</ul>
-    <p class="small ${ch.ok ? "muted" : "err"}">${ch.ok ? "Учётка подходит. Проект " + esc(ch.project) + "." : "Каких-то прав не хватает: нужна роль «Администратор виртуальных машин» (mcs_admin_vm), для FIP — ещё «Администратор внутренних сетей»."}</p>`;
+    <p class="small ${ch.ok ? "muted" : "err"}">${ch.ok ? "Учётная запись подходит. Проект " + esc(ch.project) + "." : "Каких-то прав не хватает: нужна роль «Администратор виртуальных машин» (mcs_admin_vm), для FIP — ещё «Администратор внутренних сетей»."}</p>`;
 }
 
 // --- step 3: placement ---
