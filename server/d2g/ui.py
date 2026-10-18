@@ -447,7 +447,7 @@ def action(who, p, b, ip=""):
             argv += ["--every", str(int(b["every"]))]
         if b.get("size_gb"):
             argv += ["--size-gb", str(int(b["size_gb"]))]
-        return {"task": run_task(who, f"new job for {argv[2]}", argv)}
+        return {"task": run_task(who, f"новое задание: {argv[2]}", argv)}
     if len(p) == 3 and p[0] == "job":
         jid = need({"j": p[1]}, "j", JOB_RE)
         if p[2] == "sync":
@@ -466,19 +466,19 @@ def action(who, p, b, ip=""):
                     argv += [f"--{k}", v]
             if b.get("force"):
                 argv.append("--force")
-            return {"task": run_task(who, f"finish {jid}", argv)}
+            return {"task": run_task(who, f"создание ВМ: задание {jid}", argv)}
         if p[2] == "delete":
             argv = ["job", "delete", jid] + (["--keep-volume"] if b.get("keep_volume") else [])
-            return {"task": run_task(who, f"delete {jid}", argv)}
+            return {"task": run_task(who, f"удаление задания {jid}", argv)}
     if p == ["receiver", "add"]:
         argv = ["receiver", "add", "--target", need(b, "target", TARGET_RE, optional=True) or "home"]
         for k in ("az", "flavor", "fip"):
             v = need(b, k, optional=True)
             if v:
                 argv += [f"--{k}", v]
-        return {"task": run_task(who, "new receiver", argv)}
+        return {"task": run_task(who, "новый приёмник", argv)}
     if len(p) == 3 and p[0] == "receiver" and p[2] == "delete":
-        return {"task": run_task(who, f"delete receiver {p[1]}", ["receiver", "delete", need({"r": p[1]}, "r", RX_RE)])}
+        return {"task": run_task(who, f"удаление приёмника {p[1]}", ["receiver", "delete", need({"r": p[1]}, "r", RX_RE)])}
     raise ValueError("unknown action")
 
 

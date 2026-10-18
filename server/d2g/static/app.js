@@ -16,7 +16,7 @@ const when = (t) => (t ? new Date(t * 1000).toLocaleString("ru-RU") : "—");
 const dur = (s) => (s >= 3600 ? (s / 3600).toFixed(1) + " ч" : s >= 60 ? Math.round(s / 60) + " мин" : s + " с");
 
 const JOB_STATE = { attaching: ["Подключение тома", "info"], ready: ["Готово к проходу", "info"], receiving: ["Идёт проход", "info"],
-  synced: ["Синхронизировано", "ok"], finishing: ["Переключение", "warn"], deleting: ["Удаление", "warn"], finished: ["ВМ создана", "ok"] };
+  synced: ["Синхронизировано", "ok"], finishing: ["Создаётся ВМ", "warn"], deleting: ["Удаление", "warn"], finished: ["ВМ создана", "ok"] };
 const AGENT_STATE = { enrolled: ["Подключён", "ok"], token: ["Ждёт установки", "warn"], revoked: ["Отключён", "bad"] };
 const RX_STATE = { up: ["Работает", "ok"], down: ["Нет связи", "bad"], creating: ["Создаётся", "info"], joined: ["Запускается", "info"], failed: ["Ошибка", "bad"] };
 const PATHS = { auto: "автоматически", "rx-grey": "серый IP приёмника", "rx-fip": "FIP приёмника", ctl: "через оркестратор (публичный)", "ctl-grey": "через оркестратор (серый)" };
@@ -44,11 +44,11 @@ function jobProgress(j) {
   if (j.state === "receiving") {
     const first = j.pass_no === 0;
     const pct = first ? Math.round((100 * j.parts) / j.nparts) : null;
-    const rate = j.rate ? ` · обход диска ~${Math.round(j.rate)} МиБ/с` : "";
+    const rate = j.rate ? ` · ~${Math.round(j.rate)} МиБ/с` : "";
     return `<div class="small">${first ? `первый проход: ${j.parts}/${j.nparts} частей` : `проход ${j.pass_no + 1}: изменилось ${j.pass_parts} частей`}${rate}</div>` +
       (first ? `<div class="bar"><i data-pct="${pct}"></i></div>` : "");
   }
-  if (j.state === "synced" || j.state === "finished") return `<div class="small">${j.parts}/${j.nparts} частей · проходов ${j.pass_no}</div>`;
+  if (j.state === "synced" || j.state === "finished") return `<div class="small">${j.parts}/${j.nparts} частей · проходов: ${j.pass_no}</div>`;
   return `<div class="small muted">${j.parts}/${j.nparts} частей</div>`;
 }
 function tasksPanel(limit) {
@@ -57,7 +57,7 @@ function tasksPanel(limit) {
   const st = { running: ["Выполняется", "info"], done: ["Готово", "ok"], failed: ["Ошибка", "bad"], interrupted: ["Прервано", "warn"] };
   return `<div class="panel"><table><tr><th>Операция</th><th>Кто</th><th>Состояние</th><th>Начата</th><th></th></tr>` +
     ts.map((t) => `<tr><td>${esc(t.what)}</td><td>${esc(t.who)}</td><td>${badge(st, t.state)}</td><td class="nowrap">${ago(t.started)}</td>
-      <td><button class="btn" data-act="tasklog" data-id="${esc(t.id)}">${LOGOPEN.has(t.id) ? "Скрыть лог" : "Лог"}</button></td></tr>` +
+      <td><button class="btn" data-act="tasklog" data-id="${esc(t.id)}">${LOGOPEN.has(t.id) ? "Скрыть вывод" : "Вывод"}</button></td></tr>` +
       (LOGOPEN.has(t.id) ? `<tr><td colspan="5"><pre class="log">${esc(t.log || "(пусто)")}</pre></td></tr>` : "")).join("") + `</table></div>`;
 }
 function vOverview() {
@@ -95,7 +95,7 @@ function agentsTable() {
 }
 function vAgents() {
   return `<h2><span class="grow">Исходные ВМ</span><button class="btn primary" data-act="agent-add">Добавить ВМ</button></h2>${agentsTable()}
-  <p class="small muted">Агент ставится одной командой с этого оркестратора и ждёт команд. Сертификат агента позволяет только писать в его том через приёмник; учётные данные облака на исходную ВМ не попадают.</p>`;
+  <p class="small muted">Агент устанавливается одной командой с этого оркестратора и ожидает его команд. Сертификат агента позволяет только записывать данные в его том через приёмник; учётные данные облака на исходную ВМ не попадают.</p>`;
 }
 function jobsTable(list, compact) {
   if (!list.length) return `<div class="panel"><div class="empty">${compact ? "Активных заданий нет" : "Заданий ещё нет. Сначала подключите исходную ВМ, затем создайте задание."}</div></div>`;
@@ -113,7 +113,7 @@ function jobsTable(list, compact) {
 }
 function vJobs() {
   return `<h2><span class="grow">Задания</span><button class="btn primary" data-act="job-new">Новое задание</button></h2>${jobsTable(S.jobs, false)}
-  <p class="small muted">Задание: том в целевом проекте, подключённый к приёмнику. Первый проход передаёт весь диск, следующие — только изменившиеся блоки. «Создать ВМ» отключает том и создаёт с него ВМ; источник при этом не меняется.</p>`;
+  <p class="small muted">Задание: том в целевом проекте, подключённый к приёмнику. Первый проход передаёт все занятые блоки диска, следующие (дельты) — только изменившиеся. «Создать ВМ» отключает том и создаёт с него ВМ; исходная ВМ при этом не меняется.</p>`;
 }
 function vReceivers() {
   return `<h2><span class="grow">Приёмники</span><button class="btn primary" data-act="rx-add">Добавить приёмник</button></h2>
@@ -123,7 +123,7 @@ function vReceivers() {
       <td class="small mono">${esc(r.grey_ip || "—")}${r.fip ? "<br>FIP " + esc(r.fip) : ""}</td><td class="num">${r.volumes}/${r.max_volumes}</td>
       <td class="num">${r.load != null ? Number(r.load).toFixed(2) : "—"}</td><td class="small nowrap">${ago(r.seen)}</td>
       <td>${r.local ? "" : `<button class="btn danger" data-act="rx-delete" data-name="${esc(r.name)}" ${r.volumes ? "disabled" : ""}>Удалить</button>`}</td></tr>`).join("") +
-    `</table></div><p class="small muted">Если в нужной зоне нет приёмника со свободным местом, «Новое задание» создаст его само (около 1,5 мин).</p>`;
+    `</table></div><p class="small muted">Если в нужной зоне нет приёмника со свободным местом, оркестратор создаст новый приёмник автоматически (около 1,5 мин).</p>`;
 }
 function vLog() {
   return `<h2>Операции</h2>${tasksPanel(20)}<h2>Журнал</h2><div class="panel"><table><tr><th>Время</th><th>Кто</th><th>Что</th></tr>` +
@@ -139,7 +139,7 @@ function vSettings() {
     ${row("Приёмники", `${esc(o.rx_flavor)}, тома ${esc(o.rx_volume_type)}, до ${esc(o.max_volumes)} томов на приёмник, часть ${esc(o.part_mb)} МиБ`)}
     ${row("443 на приёмниках открыт для", `<span class="mono">${esc((o.allow || []).join(", ") || "—")}</span>`)}
     ${row("Пул FIP для приёмников", `<span class="mono">${esc((o.fip_pool || []).join(", ") || "—")}</span>`)}
-    ${row("Веб-интерфейс доступен из", `<span class="mono">${esc((o.ui_allow || []).join(", "))}</span>`)}
+    ${row("Веб-интерфейс доступен с адресов", `<span class="mono">${esc((o.ui_allow || []).join(", "))}</span>`)}
     ${row("Сертификат администратора", o.ui_mtls ? "обязателен" : "не требуется")}
   </div></div>
   <p class="small muted">Администраторы и сертификат администратора — на ВМ оркестратора: <span class="mono">d2g admin add|passwd|totp|cert ИМЯ</span>, <span class="mono">d2g setup --ui-mtls on|off</span>.</p>`;
@@ -156,14 +156,14 @@ function vTargets() {
       <td>${t.name === "home" ? "" : `<div class="actions"><button class="btn" data-act="tg-edit" data-name="${esc(t.name)}">Изменить</button>
         <button class="btn danger" data-act="tg-delete" data-name="${esc(t.name)}">Удалить</button></div>`}</td></tr>`).join("") + `</table></div>
   <p class="small muted"><b>Передача тома</b> — диск принимается в проекте оркестратора, а при «Создать ВМ» том передаётся в проект и ВМ создаётся там; нужна только служебная учётная запись проекта, работает в пределах одного региона.
-  <b>Свой приёмник</b> — оркестратор создаёт приёмник внутри проекта (учётной записью проекта), диск туда и принимается; подходит для другого региона и когда данные не должны появляться в проекте оркестратора. Приёмник ходит к оркестратору по его публичному адресу, агенты — к приёмнику по серому адресу или его FIP.</p>`;
+  <b>Свой приёмник</b> — оркестратор создаёт приёмник внутри проекта (учётной записью проекта) и принимает диск прямо туда; подходит для другого региона и для случаев, когда данные не должны попадать в проект оркестратора. Приёмник подключается к оркестратору по его публичному адресу, агенты — к приёмнику по серому адресу или его FIP.</p>`;
 }
 async function editTarget(name) {
   const t = name ? tgt(name) : { name: "", title: "", mode: "transfer", allow: [], fip_pool: [], vm_sg: ["default"] };
   const home = (await cloud()).cloud || {};
   let lists = name ? await cloud(name).catch(() => null) : null;
   const creds = `<div class="grid2"><div class="field"><label>Имя (латиницей)</label><input id="tn" value="${esc(t.name)}" ${name ? "readonly" : ""} maxlength="24" placeholder="client-a"></div>
-      <div class="field"><label>Название</label><input id="tt" value="${esc(t.title || "")}" maxlength="64" placeholder="Клиент А, прод"></div></div>
+      <div class="field"><label>Название</label><input id="tt" value="${esc(t.title || "")}" maxlength="64" placeholder="Клиент А, продуктив"></div></div>
     <div class="field"><label>Способ</label><select id="tm"><option value="transfer" ${t.mode === "transfer" ? "selected" : ""}>передача тома (тот же регион)</option>
       <option value="receiver" ${t.mode === "receiver" ? "selected" : ""}>свой приёмник в проекте</option></select></div>
     <div class="field"><label>Адрес Keystone</label><input id="u" value="${esc(home.OS_AUTH_URL || "https://infra.mail.ru:35357/v3/")}"></div>
@@ -195,8 +195,8 @@ async function editTarget(name) {
       ${rx ? `<div class="grid2"><div class="field"><label>Флейвор приёмников</label><select id="tfl">${L.flavors.map((f) => `<option value="${esc(f.name)}" ${f.name === (t.rx_flavor || "STD3-4-4") ? "selected" : ""}>${esc(f.name)} — ${f.vcpus} vCPU</option>`).join("")}</select></div>
         <div class="field"><label>Тип томов</label>${sel("tvt", L.volume_types, t.rx_volume_type || (L.volume_types.includes("ceph-ssd") ? "ceph-ssd" : ""))}</div></div>
         <div class="field"><label>Ключ SSH приёмников</label>${sel("tkey", L.keypairs, t.rx_key || "", "без ключа")}</div>
-        <div class="field"><label>FIP для приёмников</label><div class="checks" id="tfips">${free.map((f) => `<label><input type="checkbox" value="${esc(f.id)}" ${(t.fip_pool || []).includes(f.id) ? "checked" : ""}>${esc(f.ip)}</label>`).join("") || '<span class="small muted">свободных FIP нет — агенты дойдут до приёмника только по серому адресу (источник в той же сети или Direct Connect)</span>'}</div></div>
-        <div class="field"><label>Исходные ВМ приходят с (443 на приёмниках проекта)</label><textarea id="tal">${esc((t.allow || []).join("\n"))}</textarea></div>` : ""}`;
+        <div class="field"><label>FIP для приёмников</label><div class="checks" id="tfips">${free.map((f) => `<label><input type="checkbox" value="${esc(f.id)}" ${(t.fip_pool || []).includes(f.id) ? "checked" : ""}>${esc(f.ip)}</label>`).join("") || '<span class="small muted">свободных FIP нет — агенты смогут подключиться к приёмнику только по серому адресу (источник в той же сети или Direct Connect)</span>'}</div></div>
+        <div class="field"><label>Исходные ВМ подключаются с (443 на приёмниках проекта)</label><textarea id="tal">${esc((t.allow || []).join("\n"))}</textarea></div>` : ""}`;
   };
   m.querySelector("#tm").addEventListener("change", settings);
   m.querySelector("#tchk").addEventListener("click", async () => {
@@ -247,7 +247,7 @@ const MODE = { home: ["проект оркестратора", ""], transfer: ["
 const volOwner = (name) => (tgt(name).mode === "receiver" ? name : "home");
 
 function startTask(r, what) {
-  if (r.task) { WATCH.add(r.task); LOGOPEN.add(r.task); toast(`${what}: запущено, ход — во вкладке «Журнал»`); }
+  if (r.task) { WATCH.add(r.task); LOGOPEN.add(r.task); toast(`${what}: запущено, ход выполнения — на вкладке «Журнал»`); }
   else if (r.message) toast(r.message);
   refresh();
 }
@@ -256,13 +256,13 @@ function addAgent(name) {
     `<div class="field"><label>Имя</label><input id="n" value="${esc(name || "")}" ${name ? "readonly" : ""} placeholder="web01" maxlength="32">
        <div class="hint">строчные латинские буквы, цифры и дефис</div></div>
      <div class="field"><label>Путь до приёмника</label>${`<select id="p">${Object.entries(PATHS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select>`}
-       <div class="hint">«автоматически» — агент берёт первый ответивший адрес: серый IP приёмника, его FIP, оркестратор</div></div>
+       <div class="hint">«автоматически» — агент использует первый ответивший адрес: серый IP приёмника, его FIP, оркестратор</div></div>
      <div class="field"><label>Потоков</label><input id="t" type="number" min="1" max="64" value="8">
-       <div class="hint">на медленном канале больше потоков не помогает</div></div>`,
+       <div class="hint">на медленном канале увеличение числа потоков не ускоряет передачу</div></div>`,
     [{ text: "Отмена" }, { text: "Получить команду", cls: "primary", ok: true }],
     async (m) => {
       const r = await api("/api/ui/agent/add", { name: val(m, "n"), path: val(m, "p"), threads: +val(m, "t") });
-      const cmds = r.commands.map((c) => `<div class="small muted">${c.kind === "public" ? "если ВМ ходит через интернет (публичный адрес оркестратора)" : "если ВМ в ЦОДе или в той же сети (серый адрес)"}</div>
+      const cmds = r.commands.map((c) => `<div class="small muted">${c.kind === "public" ? "если ВМ подключается через интернет (публичный адрес оркестратора)" : "если ВМ в ЦОДе или в той же сети (серый адрес)"}</div>
         <pre class="cmd">${esc(c.command)}</pre><button class="btn" data-copy="${esc(c.command)}">Скопировать</button>`).join("<hr>");
       modal("Команда для исходной ВМ", `<p>Выполните на исходной ВМ от root. Токен действует ${r.valid_min} мин и только один раз.</p>${cmds}`,
         [{ text: "Готово", cls: "primary" }]);
@@ -287,7 +287,7 @@ async function newJob(target, agent) {
      <div class="field"><label>Зона</label>${sel("az", c.zones, to.az)}<div class="hint">том, приёмник и будущая ВМ будут в этой зоне</div></div>
      <div class="field"><label>Дельты по расписанию</label><select id="ev"><option value="0">нет, по кнопке</option><option value="900">каждые 15 мин</option>
        <option value="3600">каждый час</option><option value="14400">каждые 4 ч</option><option value="86400">раз в сутки</option></select></div>
-     <p class="small muted">Том создаётся по размеру диска исходной ВМ и подключается к приёмнику; первый проход стартует сам.</p>`,
+     <p class="small muted">Том создаётся по размеру диска исходной ВМ и подключается к приёмнику; первый проход запускается автоматически.</p>`,
     [{ text: "Отмена" }, { text: "Создать", cls: "primary", ok: true }],
     async (m) => { const r = await api("/api/ui/job/new", { agent: val(m, "a"), target: val(m, "tg"), type: val(m, "vt"), az: val(m, "az"), every: +val(m, "ev") }); close(); startTask(r, "Новое задание"); });
   // another project: other zones and volume types
@@ -297,7 +297,7 @@ async function finishJob(id) {
   const j = S.jobs.find((x) => x.id === id), t = tgt(j.target), c = await cloud(j.target);
   const where = t.name === "home" ? "" : `<p class="small">ВМ будет создана в проекте <b>${esc(t.title || t.name)}</b>${t.mode === "transfer" ? " — том сначала будет передан туда из проекта оркестратора" : ""}.</p>`;
   modal(`Создать ВМ из ${j.agent}`,
-    `<p class="small">Снапшот: <b>${esc((j.synced_snapshot || "").replace("T", " ").replace(/\.\d+Z$/, " UTC"))}</b> (${ago(j.synced_at)}). Чтобы ВМ была свежей, сначала сделайте дельту. Том отключится от приёмника, дальнейшие проходы будут невозможны.</p>${where}
+    `<p class="small">Снапшот: <b>${esc((j.synced_snapshot || "").replace("T", " ").replace(/\.\d+Z$/, " UTC"))}</b> (${ago(j.synced_at)}). Чтобы новая ВМ содержала последние изменения, сначала выполните дельту. После создания ВМ том отключается от приёмника, и новые проходы по этому заданию невозможны.</p>${where}
      <div class="field"><label>Имя ВМ</label><input id="nm" value="${esc(j.agent)}-d2g" maxlength="64"></div>
      <div class="field"><label>Флейвор</label><select id="fl">${c.flavors.map((f) => `<option value="${esc(f.name)}">${esc(f.name)} — ${f.vcpus} vCPU, ${Math.round(f.ram / 1024)} ГБ</option>`).join("")}</select></div>
      <div class="field"><label>Сеть</label>${sel("net", c.networks, t.network || S.orchestrator.network)}</div>
@@ -335,7 +335,7 @@ function setAccess() {
   const o = S.orchestrator;
   modal("Доступ", `<div class="field"><label>Веб-интерфейс открыт для</label><textarea id="ua">${esc((o.ui_allow || []).join("\n"))}</textarea>
       <div class="hint">по одному адресу или подсети в строке; ваш текущий адрес должен остаться в списке</div></div>
-    <div class="field"><label>Исходные ВМ приходят с (443 на отдельных приёмниках)</label><textarea id="al">${esc((o.allow || []).join("\n"))}</textarea></div>
+    <div class="field"><label>Исходные ВМ подключаются с (443 на отдельных приёмниках)</label><textarea id="al">${esc((o.allow || []).join("\n"))}</textarea></div>
     <p class="small muted">Группа безопасности самой ВМ оркестратора этой формой не меняется.</p>`,
     [{ text: "Отмена" }, { text: "Сохранить", cls: "primary", ok: true }],
     async (m) => { const r = await api("/api/ui/settings/access", { ui_allow: lines(m.querySelector("#ua").value), allow: lines(m.querySelector("#al").value) }); close(); toast(r.message); refresh(); });
@@ -388,7 +388,7 @@ document.addEventListener("click", (e) => {
   if (a === "agent-add") return addAgent(name);
   if (a === "agent-sync") return run(api(`/api/ui/agent/${name}/sync`, {}).then((r) => startTask(r, "Проход")));
   if (a === "agent-revoke") return confirmAct(`Отключить ${name}`, "Сертификат агента перестанет приниматься оркестратором и приёмниками. Задания останутся.", "Отключить", () => api(`/api/ui/agent/${name}/revoke`, {}));
-  if (a === "agent-uninstall") return confirmAct(`Удалить агента с ${name}`, "Агент удалит себя с исходной ВМ (модуль, бинарники, настройки) при следующем опросе. Сама ВМ не меняется.", "Удалить агента", () => api(`/api/ui/agent/${name}/uninstall`, {}));
+  if (a === "agent-uninstall") return confirmAct(`Удалить агента с ${name}`, "Агент удалит себя с исходной ВМ (модуль, программы, настройки) при следующем опросе. Сама ВМ не меняется.", "Удалить агента", () => api(`/api/ui/agent/${name}/uninstall`, {}));
   if (a === "job-new") return run(newJob());
   if (a === "job-sync") return run(api(`/api/ui/job/${id}/sync`, {}).then((r) => startTask(r, "Дельта")));
   if (a === "job-every") return every(id);
@@ -397,7 +397,7 @@ document.addEventListener("click", (e) => {
   if (a === "rx-add") return run(addRx());
   if (a === "tg-add") return run(editTarget());
   if (a === "tg-edit") return run(editTarget(name));
-  if (a === "tg-delete") return confirmAct(`Удалить проект ${name}`, "Оркестратор забудет проект и удалит его учётную запись. Приёмников и незавершённых заданий в проекте быть не должно; ВМ в проекте не трогаются.", "Удалить", () => api(`/api/ui/target/${name}/delete`, {}));
+  if (a === "tg-delete") return confirmAct(`Удалить проект ${name}`, "Проект будет удалён из списка вместе с его учётной записью. Приёмников и незавершённых заданий в проекте быть не должно; ВМ в проекте не затрагиваются.", "Удалить", () => api(`/api/ui/target/${name}/delete`, {}));
   if (a === "set-access") return setAccess();
   if (a === "set-rx") return run(setRx());
   if (a === "set-cloud") return run(setCloud());
@@ -414,7 +414,7 @@ async function refresh() {
     S = await api("/api/ui/state");
     for (const id of [...WATCH]) {
       const t = S.tasks.find((x) => x.id === id);
-      if (t && t.state !== "running") { WATCH.delete(id); toast(`${t.what}: ${t.state === "done" ? "готово" : "ошибка, см. лог"}`, t.state !== "done"); }
+      if (t && t.state !== "running") { WATCH.delete(id); toast(`${t.what}: ${t.state === "done" ? "готово" : "ошибка, см. вывод операции"}`, t.state !== "done"); }
     }
     if (!$("#modal").firstChild && !POINTER) render();
   } catch (x) { if (x.message !== "login") toast("Нет связи с оркестратором: " + x.message, true); }

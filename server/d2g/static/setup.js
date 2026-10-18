@@ -42,7 +42,7 @@ function bind(id, fn) { const e = $("#" + id); if (e) e.addEventListener("click"
 // --- step 0: the setup code ---
 function pageCode() {
   $("#page").innerHTML = `<h2>Первоначальная настройка оркестратора</h2>
-    <p class="lead">Введите одноразовый код настройки. Его напечатал установщик; новый код: <span class="mono">sudo d2g setup-code</span> на ВМ оркестратора.</p>
+    <p class="lead">Введите одноразовый код настройки. Код выведен установщиком; новый код: <span class="mono">sudo d2g setup-code</span> на ВМ оркестратора.</p>
     <form id="cf">${field("Код настройки", `<input id="code" class="mono" placeholder="xxxx-xxxx-xxxx" autocomplete="off" autofocus>`)}
     <div class="err" id="cerr"></div><button class="btn primary" type="submit">Продолжить</button></form>`;
   $("#cf").addEventListener("submit", async (e) => {
@@ -99,7 +99,7 @@ function page2() {
   $("#page").innerHTML = `<h2>Облако</h2><p class="lead">Сервисная учётная запись проекта, в который переносятся ВМ. Она хранится только на этой ВМ (<span class="mono">/etc/d2g/openrc</span>, права 600) и на исходные ВМ не попадает.</p>
     ${field("Адрес Keystone", `<input id="u" value="${esc(c.auth_url)}">`)}
     <div class="grid2">${field("ID проекта", `<input id="pr" class="mono" value="${esc(c.project_id)}">`)}${field("Регион", `<input id="rg" value="${esc(c.region)}">`)}</div>
-    <div class="grid2">${field("Пользователь", `<input id="un" value="${esc(c.username)}" autocomplete="off">`)}${field("Домен пользователя", `<input id="dm" value="${esc(c.user_domain)}">`, "сервисные учётной записи VK Cloud: service-users")}</div>
+    <div class="grid2">${field("Пользователь", `<input id="un" value="${esc(c.username)}" autocomplete="off">`)}${field("Домен пользователя", `<input id="dm" value="${esc(c.user_domain)}">`, "у сервисных учётных записей VK Cloud — service-users")}</div>
     ${field("Пароль", `<input id="pw" type="password" autocomplete="off" value="${esc(c.password)}">`)}
     <button class="btn" id="chk">Проверить</button> <span id="chs"></span>
     <div id="res">${ch ? checks(ch) : ""}</div><div class="err" id="err"></div>${nav(true, true)}`;
@@ -123,7 +123,7 @@ function page2() {
 }
 function checks(ch) {
   return `<ul class="checklist">${ch.checks.map((x) => `<li><span class="${x.ok ? "ok-t" : "bad-t"}">${x.ok ? "✓" : "✗"}</span><span>${esc(x.name)}</span><span class="d">${esc(x.detail)}</span></li>`).join("")}</ul>
-    <p class="small ${ch.ok ? "muted" : "err"}">${ch.ok ? "Учётная запись подходит. Проект " + esc(ch.project) + "." : "Каких-то прав не хватает: нужна роль «Администратор виртуальных машин» (mcs_admin_vm), для FIP — ещё «Администратор внутренних сетей»."}</p>`;
+    <p class="small ${ch.ok ? "muted" : "err"}">${ch.ok ? "Учётная запись подходит. Проект " + esc(ch.project) + "." : "Недостаточно прав: нужна роль «Администратор виртуальных машин» (mcs_admin_vm), для FIP — ещё «Администратор внутренних сетей»."}</p>`;
 }
 
 // --- step 3: placement ---
@@ -131,10 +131,10 @@ function page3() {
   const L = W.check.lists, me = W.check.me || {}, p = W.place;
   p.az = p.az || W.check.az; p.network = p.network || (me.networks || [])[0] || L.networks[0];
   if (!p.public_ip && me.fip) p.public_ip = me.fip;
-  $("#page").innerHTML = `<h2>Размещение</h2><p class="lead">Определено по метаданным этой ВМ; поправьте, если нужно.</p>
+  $("#page").innerHTML = `<h2>Размещение</h2><p class="lead">Значения определены по метаданным этой ВМ; при необходимости измените их.</p>
     ${field("Зона доступности", `<select id="az">${opt(L.zones, p.az)}</select>`, "тома, приёмники и новые ВМ создаются в этой зоне")}
     ${field("Сеть оркестратора и приёмников", `<select id="net">${opt(L.networks, p.network)}</select>`)}
-    ${field("Публичный адрес (FIP) оркестратора", `<input id="pip" value="${esc(p.public_ip || "")}" placeholder="нет">`, "по нему приходят агенты из интернета и открывается интерфейс; пусто — только серый адрес " + esc(W.info.grey_ip))}
+    ${field("Публичный адрес (FIP) оркестратора", `<input id="pip" value="${esc(p.public_ip || "")}" placeholder="нет">`, "по нему подключаются агенты из интернета и открывается интерфейс; пусто — только серый адрес " + esc(W.info.grey_ip))}
     <div class="err" id="err"></div>${nav(true, true)}`;
   const read = () => Object.assign(p, { az: $("#az").value, network: $("#net").value, public_ip: $("#pip").value.trim() });
   bind("back", () => { read(); go(1); });
@@ -147,14 +147,14 @@ function page4() {
   r.flavor = r.flavor || (L.flavors.find((f) => f.name === "STD3-4-4") || L.flavors.find((f) => f.vcpus >= 4) || L.flavors[0]).name;
   r.volume_type = r.volume_type || (L.volume_types.includes("ceph-ssd") ? "ceph-ssd" : L.volume_types[0]);
   const free = (L.fips || []).filter((f) => f.free && f.ip !== W.place.public_ip);
-  $("#page").innerHTML = `<h2>Приёмники</h2><p class="lead">Приёмник принимает диски и пишет их в тома. По умолчанию он работает на этой же ВМ; отдельные приёмники оркестратор создаёт сам, когда на этом не хватает места.</p>
+  $("#page").innerHTML = `<h2>Приёмники</h2><p class="lead">Приёмник принимает диски и записывает их в тома. По умолчанию он работает на этой же ВМ; отдельные приёмники оркестратор создаёт сам, когда на этой ВМ не хватает места для томов.</p>
     <div class="field checks"><label><input type="checkbox" id="loc" ${r.local ? "checked" : ""}> Приёмник на этой ВМ (rx0) — рекомендуется 4–8 vCPU</label></div>
     <div class="grid2">${field("Тип томов", `<select id="vt">${opt(L.volume_types, r.volume_type)}</select>`)}
     ${field("Томов на приёмник", `<input id="mv" type="number" min="1" max="26" value="${r.max_volumes}">`)}</div>
     ${field("Флейвор отдельных приёмников", `<select id="fl">${opt(L.flavors, r.flavor, flavorLabel)}</select>`)}
     ${field("Ключ SSH для отдельных приёмников", `<select id="key"><option value="">без ключа</option>${opt(L.keypairs, r.key)}</select>`, "для диагностики; можно без ключа")}
-    ${field("FIP, которые можно отдать приёмникам", free.length ? `<div class="checks">${free.map((f) => `<label><input type="checkbox" value="${esc(f.id)}" ${r.fip_pool.includes(f.id) ? "checked" : ""}> ${esc(f.ip)}</label>`).join("")}</div>` : '<div class="muted small">свободных FIP в проекте нет — приёмники будут доступны по серому адресу и через оркестратор</div>',
-      "свой FIP ускоряет приём из интернета; новые FIP оркестратор не выделяет")}
+    ${field("FIP, которые можно назначать приёмникам", free.length ? `<div class="checks">${free.map((f) => `<label><input type="checkbox" value="${esc(f.id)}" ${r.fip_pool.includes(f.id) ? "checked" : ""}> ${esc(f.ip)}</label>`).join("")}</div>` : '<div class="muted small">свободных FIP в проекте нет — приёмники будут доступны по серому адресу и через оркестратор</div>',
+      "собственный FIP ускоряет приём из интернета; новые FIP оркестратор не выделяет")}
     ${nav(true, true)}`;
   const read = () => Object.assign(r, { local: $("#loc").checked, volume_type: $("#vt").value, max_volumes: +$("#mv").value || 20,
     flavor: $("#fl").value, key: $("#key").value, fip_pool: [...document.querySelectorAll(".checks input[value]:checked")].map((x) => x.value) });
@@ -165,9 +165,9 @@ function page4() {
 // --- step 5: access ---
 function page5() {
   const a = W.access;
-  $("#page").innerHTML = `<h2>Доступ</h2><p class="lead">Кто может открыть интерфейс и откуда приходят исходные ВМ. По одному адресу или подсети в строке.</p>
-    ${field("Веб-интерфейс открыт для", `<textarea id="ua">${esc(a.ui_allow)}</textarea>`, `ваш адрес сейчас: <span class="mono">${esc(W.info.client_ip)}</span>; остальным — 403`)}
-    ${field("Исходные ВМ приходят с", `<textarea id="al" placeholder="10.0.0.0/8&#10;203.0.113.7/32">${esc(a.allow)}</textarea>`, "подсети ЦОДа (Direct Connect) и внешние адреса (SNAT) других облаков; используется для групп безопасности")}
+  $("#page").innerHTML = `<h2>Доступ</h2><p class="lead">Кто может открыть интерфейс и с каких адресов подключаются исходные ВМ. По одному адресу или подсети в строке.</p>
+    ${field("Веб-интерфейс открыт для", `<textarea id="ua">${esc(a.ui_allow)}</textarea>`, `ваш текущий адрес: <span class="mono">${esc(W.info.client_ip)}</span>; остальным — 403`)}
+    ${field("Исходные ВМ подключаются с", `<textarea id="al" placeholder="10.0.0.0/8&#10;203.0.113.7/32">${esc(a.allow)}</textarea>`, "подсети ЦОДа (Direct Connect) и внешние адреса (SNAT) других облаков; используется для групп безопасности")}
     <div class="field checks"><label><input type="checkbox" id="sg" ${a.ctl_sg ? "checked" : ""}><span>Открыть 443 для этих адресов и подсети приёмников в группе безопасности d2g-ctl и подключить её к этой ВМ</span></label></div>
     <div class="err" id="err"></div>${nav(true, true)}`;
   const read = () => Object.assign(a, { ui_allow: $("#ua").value, allow: $("#al").value, ctl_sg: $("#sg").checked });
@@ -179,14 +179,14 @@ function page5() {
 function page6() {
   const a = W.admin, c = W.cloud, p = W.place, r = W.rx, x = W.access;
   const row = (k, v) => `<div>${esc(k)}</div><div>${v}</div>`;
-  $("#page").innerHTML = `<h2>Применить</h2><p class="lead">Проверьте и примените. Займёт до минуты.</p>
+  $("#page").innerHTML = `<h2>Применить</h2><p class="lead">Проверьте настройки и нажмите «Применить». Это займёт до минуты.</p>
     <div class="summary">${row("Администратор", esc(a.name) + (a.totp ? " · TOTP" : ""))}
     ${row("Облако", `${esc(c.username)} @ проект <span class="mono">${esc(c.project_id)}</span>`)}
     ${row("Зона, сеть", esc(p.az + ", " + p.network))}${row("Публичный адрес", esc(p.public_ip || "нет"))}
     ${row("Приёмник на этой ВМ", r.local ? "да" : "нет")}${row("Отдельные приёмники", esc(`${r.flavor}, тома ${r.volume_type}, до ${r.max_volumes} томов, FIP: ${r.fip_pool.length || "нет"}`))}
     ${row("Интерфейс открыт для", `<span class="mono">${esc(lines(x.ui_allow).join(", "))}</span>`)}
     ${row("Исходные ВМ с", `<span class="mono">${esc(lines(x.allow).join(", ") || "—")}</span>`)}
-    ${row("Группа безопасности", x.ctl_sg ? "открыть 443 (d2g-ctl)" : "не трогать")}</div>
+    ${row("Группа безопасности", x.ctl_sg ? "открыть 443 (d2g-ctl)" : "не изменять")}</div>
     <div id="out"></div><div class="err" id="err"></div>${nav(true, true, "Применить")}`;
   bind("back", () => go(4));
   bind("next", async () => {
@@ -198,7 +198,7 @@ function page6() {
       W.step = 6; steps();
       $("#page").innerHTML = `<h2>Готово</h2><ul class="checklist">${res.steps.map((s) => `<li><span class="ok-t">✓</span><span>${esc(s)}</span></li>`).join("")}</ul>
         <p>Оркестратор перезапускается. Через несколько секунд войдите как <b>${esc(a.name)}</b>: <a href="/login">открыть интерфейс</a>.</p>
-        <p class="small muted">Дальше: «Исходные ВМ» → «Добавить ВМ», выполнить команду на исходной ВМ, затем «Задания» → «Новое задание».</p>`;
+        <p class="small muted">Далее: «Исходные ВМ» → «Добавить ВМ», выполните команду на исходной ВМ, затем «Задания» → «Новое задание».</p>`;
       setTimeout(() => { location.href = "/login"; }, 8000);
     } catch (e) { $("#out").innerHTML = ""; $("#err").textContent = e.message; $("#next").disabled = false; }
   });

@@ -22,7 +22,8 @@
 | Новая ВМ | из образа или тома, командами `openstack` | кнопка «Создать ВМ» или `d2g job finish` |
 | Инфраструктура в целевом облаке | не нужна | оркестратор с приёмником на той же ВМ; дополнительные приёмники оркестратор создаёт сам |
 | Несколько проектов | отдельная учётная запись на каждой исходной ВМ | один оркестратор, учётные записи проектов хранятся только на нём; передача тома в проект или собственный приёмник в проекте |
-| Документация | [quickstart.md](docs/quickstart.md), [usage.md](docs/usage.md), [s3-mode.md](docs/s3-mode.md) | [orchestrator.md](docs/orchestrator.md), [receiver-mode.md](docs/receiver-mode.md) |
+| Документация | [quickstart.md](docs/quickstart.md), [usage.md](docs/usage.md), [s3-mode.md](docs/s3-mode.md) | [guide.md](docs/guide.md), [orchestrator.md](docs/orchestrator.md), [receiver-mode.md](docs/receiver-mode.md) |
+
 
 Снапшоты, модули dattobd, проверки гостевой ОС и ограничения у обоих вариантов общие.
 
@@ -47,7 +48,9 @@
 | **Флейвор (flavor)** | тип ВМ в облаке: число vCPU и объём памяти, например `STD3-4-8`. |
 
 
-**Как начать: [docs/quickstart.md](docs/quickstart.md)** — установка и перенос по шагам.
+**Как начать:** вариант 1 (только агент) — [docs/quickstart.md](docs/quickstart.md); вариант 2
+(оркестратор и веб-интерфейс) — **[docs/guide.md](docs/guide.md)**, пошаговое руководство с
+иллюстрациями.
 
 Коротко (вариант 1, Glance): архив из [Releases](https://github.com/jaland-hara/disk2glance/releases) скопировать на исходную ВМ, затем
 
@@ -70,7 +73,8 @@ curl -fsSL https://github.com/jaland-hara/disk2glance/releases/latest/download/d
 
 ## Документация
 
-- [docs/quickstart.md](docs/quickstart.md): **перенос по шагам** — установка, учётные данные, проверка, запуск, новая ВМ.
+- [docs/guide.md](docs/guide.md): **пошаговое руководство с иллюстрациями** — ВМ оркестратора в VK Cloud, SSH и туннель, установка, мастер, агенты, перенос, новая ВМ, перенос в другой проект.
+- [docs/quickstart.md](docs/quickstart.md): **перенос по шагам** (вариант 1, только агент) — установка, учётные данные, проверка, запуск, новая ВМ.
 - [docs/usage.md](docs/usage.md): справочник — файлы конфигурации, параметры, установщик, ошибки.
 - [docs/service-accounts.md](docs/service-accounts.md): сервисные учётные записи VK Cloud для переноса, какие роли нужны, что указать при создании ВМ.
 - [docs/guest-drivers.md](docs/guest-drivers.md): драйверы гостевой ОС для KVM/VK Cloud, что проверяет агент, как подготовить ВМ с VMware/Hyper-V.
@@ -78,7 +82,9 @@ curl -fsSL https://github.com/jaland-hara/disk2glance/releases/latest/download/d
 - [docs/s3-mode.md](docs/s3-mode.md): **экспериментальный перенос через S3** — многопоточная загрузка частями и сборка новой ВМ из S3, замеры и лимиты S3 VK.
 - [docs/orchestrator.md](docs/orchestrator.md): **вариант 2, инфраструктура d2g** — оркестратор и приёмники в целевом проекте, установка агента одной командой, перенос сразу в том, дельты, сборка ВМ.
 - [docs/receiver-mode.md](docs/receiver-mode.md): протокол передачи на приёмник, устройство приёмника, замеры.
-- [docs/speed-tests.md](docs/speed-tests.md): справочник замеров скорости — диски (тип, размер), Glance, S3, приёмник, каналы между площадками, BBR, multiqueue.
+- [docs/speed-tests.md](docs/speed-tests.md): сколько займёт перенос, от чего зависит скорость и как её увеличить; подробные замеры.
+- [docs/test-reports.md](docs/test-reports.md): протоколы испытаний инфраструктуры d2g на стендах VK Cloud.
+
 - [docs/limitations.md](docs/limitations.md): ограничения, их причины и можно ли их снять.
 - [docs/build-modules.md](docs/build-modules.md): сборка модулей dattobd под новые ядра на сборочной ВМ.
 - [THIRD_PARTY.md](THIRD_PARTY.md): все сторонние компоненты, откуда взяты, как собраны, лицензии.
