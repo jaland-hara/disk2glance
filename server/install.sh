@@ -16,7 +16,7 @@ case ${1:-} in
   --role) ROLE=$2; shift 2 ;;
   --uninstall)
     systemctl disable --now d2g-orch d2g-rx 2>/dev/null || true
-    rm -f /etc/systemd/system/d2g-orch.service /etc/systemd/system/d2g-rx.service /usr/local/sbin/d2g
+    rm -f /etc/systemd/system/d2g-orch.service /etc/systemd/system/d2g-rx.service /usr/local/sbin/d2g /etc/needrestart/conf.d/d2g.conf
     rm -rf /opt/d2g
     sed -i '/d2g-stream.conf/d' /etc/nginx/nginx.conf 2>/dev/null || true
     rm -f /etc/nginx/d2g-stream.conf; systemctl reload nginx 2>/dev/null || true
@@ -35,6 +35,13 @@ cat >/usr/local/sbin/d2g <<'WRAP'
 exec python3 -c 'import sys; sys.path.insert(0, "/opt/d2g"); from d2g.__main__ import main; sys.exit(main())' "$@"
 WRAP
 chmod 755 /usr/local/sbin/d2g
+# needrestart (unattended-upgrades) restarts services that use updated libraries: a restart of
+# nginx or the receiver in the middle of a transfer breaks every connection (seen on fresh VMs)
+if [ -d /etc/needrestart ]; then
+  mkdir -p /etc/needrestart/conf.d
+  printf '%s\n' '$nrconf{override_rc}{qr(^d2g-(orch|rx)\.service$)} = 0;' '$nrconf{override_rc}{qr(^nginx\.service$)} = 0;' \
+    >/etc/needrestart/conf.d/d2g.conf
+fi
 
 case $ROLE in
 orch)

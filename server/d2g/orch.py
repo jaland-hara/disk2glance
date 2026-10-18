@@ -306,6 +306,19 @@ def cmd_serve(a):
     c = conf()
     db_init()
     db().execute("UPDATE tasks SET state='interrupted', finished=? WHERE state='running'", (now(),))
+    try:   # the VM re-created on its boot volume (other flavor, multiqueue) has a new server id
+        md = metadata()
+        if md.get("uuid") and md["uuid"] != c.get("server_id"):
+            log(f"this VM is now server {md['uuid']} (was {c.get('server_id')}): configuration updated")
+            event("orchestrator", f"server id {c.get('server_id')} -> {md['uuid']} (VM re-created on its boot volume)")
+            c["server_id"] = md["uuid"]
+            C.save_json(CONF, c)
+    except Exception as ex:
+        log(f"WARN: metadata service: {ex}")
+    # rx0 is this VM (d2g setup may have updated the configuration already)
+    if db().execute("UPDATE receivers SET server_id=? WHERE local=1 AND server_id IS NOT ?",
+                    (c["server_id"], c["server_id"])).rowcount:
+        log(f"local receiver: server id set to {c['server_id']}")
     srv = C.Server(("127.0.0.1", c["api_port"]), OrchHandler)
     srv.ctx = C.server_ctx(f"{PKI}/ctl.crt", f"{PKI}/ctl.key", f"{PKI}/ca.crt")
     srv.conf, srv.ui = c, False
@@ -483,7 +496,7 @@ def local_receiver(c, cl, me):
     db().execute("INSERT OR REPLACE INTO receivers (name, server_id, az, flavor, grey_ip, state, cert_serial, created, local) "
                  "VALUES ('rx0',?,?,?,?,'joined',?,?,1)", (c["server_id"], c["az"], flavor, c["grey_ip"], serial, now()))
     C.save_json(recv.CONF, {"name": "rx0", "dns": rx_dns(c, "rx0"), "ctl_name": c["ctl_name"], "ctl_addr": "127.0.0.1",
-                            "bind": "127.0.0.1", "port": LOCAL_RX_PORT, "max_inflight": 4 * (os.cpu_count() or 1),
+                            "bind": "127.0.0.1", "port": LOCAL_RX_PORT, "max_inflight": None,
                             "max_per_job": 16})
     recv.db.init()
     event(actor(), "receiver rx0: local (on the orchestrator VM)")
@@ -781,10 +794,11 @@ def cmd_job(a):
         t = T.tconf(c, j["target"])
         cl = T.cloud_for(T.volume_owner(t))
         d.execute("UPDATE jobs SET state=? WHERE id=?", ("finishing" if a.op == "finish" else "deleting", j["id"]))
-        if r and rx_up(r):
-            wait_job(j["id"], lambda x: x["rx_released"] == 1, 60, "the receiver to release the volume")
         v = cl.vol(j["volume_id"])
-        if any(x.get("server_id") == r["server_id"] for x in v.get("attachments", [])):
+        attached = bool(r) and any(x.get("server_id") == r["server_id"] for x in v.get("attachments", []))
+        if attached and rx_up(r):   # (a job whose attach failed was never served by the receiver)
+            wait_job(j["id"], lambda x: x["rx_released"] == 1, 60, "the receiver to release the volume")
+        if attached:
             cl.detach(r["server_id"], j["volume_id"])
         log(f"volume {j['volume_id']} detached from {j['receiver']}")
         if a.op == "delete":

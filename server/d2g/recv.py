@@ -305,7 +305,7 @@ def cmd_join(a):
     with open(f"{PKI}/rx.crt", "w") as f:
         f.write(resp["cert"])
     C.save_json(CONF, {"name": j["name"], "dns": resp["dns"], "ctl_name": j["ctl_name"], "ctl_addr": j["ctl_addr"],
-                       "port": 443, "max_inflight": resp.get("max_inflight", 4 * (os.cpu_count() or 1)),
+                       "port": 443, "max_inflight": resp.get("max_inflight"),
                        "max_per_job": resp.get("max_per_job", 16)})
     os.remove(a.join_file)
     db.init()
@@ -324,6 +324,8 @@ def cmd_serve(a):
     srv.ctx = C.server_ctx(f"{PKI}/rx.crt", f"{PKI}/rx.key", f"{PKI}/ca.crt")
     srv.conf, srv.ui = conf, False
     workers = a.workers or os.cpu_count() or 1
+    # not fixed at install time: the VM may get more vCPUs later
+    conf["max_inflight"] = conf.get("max_inflight") or 4 * (os.cpu_count() or 1)
     total = multiprocessing.BoundedSemaphore(conf["max_inflight"])
     srv.limits = Limits(total, conf["max_per_job"])
     log(f"receiver {conf['dns']} on :{conf['port']} ({workers} workers, inflight {conf['max_inflight']}, "
