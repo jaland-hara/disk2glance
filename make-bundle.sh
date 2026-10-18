@@ -20,6 +20,9 @@ if [ ! -f "dist/dattobd-$DATTOBD_TAG.tar.gz" ]; then
 fi
 tar xzf "dist/dattobd-$DATTOBD_TAG.tar.gz" -C "$OUT/src"
 mv "$OUT/src/dattobd-${DATTOBD_TAG#v}" "$OUT/src/dattobd"
+# the modules are built with patches/*.patch: ship the same patched source (and the patches)
+for p in patches/*.patch; do patch -s -d "$OUT/src/dattobd" -p1 <"$p" || { echo "patch $p failed"; exit 1; }; done
+cp -r patches "$OUT/src/"
 
 # verify every module checksum before packing
 for d in "$OUT"/modules/*/; do (cd "$d" && shasum -a 256 -c dattobd.ko.sha256 >/dev/null) || { echo "bad module $d"; exit 1; }; done

@@ -56,6 +56,18 @@ sudo bash build-module.sh 6.12.92-1.red80.x86_64 6.12.101-1.red80.x86_64
 5. сохраняет `modules/<ver>/dattobd.ko` (без отладочной информации) и `dattobd.ko.sha256`.
 
 Исходники берутся из `/root/dattobd` (тег `v0.12.2`); если их нет, скрипт клонирует репозиторий с GitHub.
+На копию исходников перед сборкой накладываются доработки из `patches/` рядом со скриптом
+(каталог можно задать переменной `PATCHES`), по порядку имён:
+
+| Доработка | Что делает |
+|---|---|
+| `dattobd-hold-thaw.patch` | набор снапшотов в одну точку времени: параметры `hold_thaw`, `release_held`, `hold_timeout_ms` ([multi-disk.md](multi-disk.md)) |
+| `dattobd-write-zeroes.patch` | исправляет ошибку dattobd 0.12.2 на ядрах 6.0 и новее: проверка `REQ_OP_WRITE_ZEROES` не компилировалась из-за опечатки в имени макроса (`HAVE_ENUM_REQ_OPF_WRITE_ZEROES` вместо `HAVE_ENUM_REQ_OP_WRITE_ZEROES`), и запрос «записать нули» к диску со снапшотом вызывал сбой ядра в `bio_needs_cow` |
+
+Архив с исходниками для сборочной ВМ упаковывайте без служебных файлов macOS
+(`COPYFILE_DISABLE=1 tar --no-xattrs …`). Скопируйте на сборочную ВМ
+`build-module.sh` вместе с каталогом `patches/`. Проверить, что модуль собран с доработкой:
+после загрузки есть `/sys/module/dattobd/parameters/hold_thaw`.
 
 Какие ядра есть в репозитории:
 

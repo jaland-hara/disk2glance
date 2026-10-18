@@ -66,7 +66,7 @@ disk2glance копирует диск виртуальной машины в о�
   выполнить
 
   ```bash
-  tar xzf disk2glance-0.7.0.tar.gz && cd disk2glance-0.7.0
+  tar xzf disk2glance-0.8.0.tar.gz && cd disk2glance-0.8.0
   sudo ./install.sh                         # создаст /etc/disk2glance/{openrc,props.json,disk2glance.conf}
   sudo vi /etc/disk2glance/openrc           # вписать учётные данные целевого облака
   sudo disk2glance --check                  # проверка без переноса
@@ -171,7 +171,7 @@ disk2glance копирует диск виртуальной машины в о�
 | `d2g-server-install.sh` | установка оркестратора одной командой из GitHub Releases |
 | `make-bundle.sh`, `make-server-bundle.sh` | сборка архивов агента и сервера в `dist/` |
 | `publish-release.sh` | публикация релиза в GitHub Releases (токен из `GITHUB_TOKEN`) |
-| `build-module.sh`, `modules/` | сборка `dattobd.ko` и готовые модули (dattobd 0.12.2) |
+| `build-module.sh`, `modules/`, `patches/` | сборка `dattobd.ko`, готовые модули (dattobd 0.12.2) и доработки dattobd: набор снапшотов, исправление для ядер 6.0+ |
 | `bin/` | статические `dbdctl`, `update-img` (dattobd) и `jq` 1.7.1 |
 | `setup-testload.sh`, `verify-clone.sh` | тестовая нагрузка на исходной ВМ и проверка данных на новой ВМ |
 | `examples/` | шаблоны `openrc`, `disk2glance.conf` и `props.json` для проверенных ОС |

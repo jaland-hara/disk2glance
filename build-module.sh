@@ -6,10 +6,12 @@
 #   e.g. build-module.sh 6.12.92-1.red80.x86_64 6.8.0-134-generic
 # Needs: gcc, make, git, elfutils-libelf-devel; dattobd source in $SRC (default /root/dattobd, tag $V).
 # No dkms needed: genconfig.sh + kbuild are run directly, as root.
+# patches/*.patch next to this script (or in $PATCHES) are applied to the build copy (patch -p2).
 set -euo pipefail
 V=${V:-0.12.2}
 SRC=${SRC:-/root/dattobd}
 OUT=${OUT:-$PWD/modules}
+PATCHES=${PATCHES:-$(cd "$(dirname "$0")" && pwd)/patches}
 log() { echo "$(date -u +%T) $*" >&2; }
 
 [ -d "$SRC" ] || git -c advice.detachedHead=false clone -q --branch v$V https://github.com/datto/dattobd.git "$SRC"
@@ -45,6 +47,7 @@ for k in "$@"; do
   prep_headers "$k"
   # same steps as dattobd's dkms.conf (PRE_BUILD genconfig.sh + kbuild), without needing dkms
   B=$(mktemp -d); cp -r "$SRC"/src/. "$B/"
+  for p in "$PATCHES"/*.patch; do [ -f "$p" ] || continue; patch -s -d "$B" -p2 <"$p" || { log "patch $p failed"; exit 1; }; log "   applied $(basename "$p")"; done
   ( cd "$B" && make clean >/dev/null 2>&1 || true
     ./genconfig.sh "$k" && make -C "/lib/modules/$k/build" M="$B" KVER="$k" modules ) >/tmp/build-$k.log 2>&1 \
     || { tail -20 /tmp/build-$k.log; exit 1; }

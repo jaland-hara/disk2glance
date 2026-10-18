@@ -184,8 +184,15 @@ fi
 MINORS=(); declare -A SNAPDEV
 killtree() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do killtree "$c"; done; kill -TERM "$1" 2>/dev/null || true; }
 UPLOAD_ID=
+# snapshot sets of the disk2glance dattobd build: thaw whatever is still held (idempotent)
+HOLD=/sys/module/dattobd/parameters
+hold_release() {
+  [ "${SNAP_SET:-0}" = 1 ] || return 0
+  echo 1 >"$HOLD/release_held" 2>/dev/null; echo 0 >"$HOLD/hold_thaw" 2>/dev/null; SNAP_SET=2
+}
 cleanup() {
   local m i
+  hold_release
   [ -n "${XPID:-}" ] && { killtree "$XPID"; wait "$XPID" 2>/dev/null || true; XPID=; }
   [ -n "${PPID_MON:-}" ] && kill "$PPID_MON" 2>/dev/null || true
   rm -rf "${BUF:-/dev/shm/disk2s3}" "$WORK/buf"
@@ -262,13 +269,35 @@ discard_off
 fb_install
 t0=$(date +%s); sync; log "sync before snapshots: $(( $(date +%s) - t0 )) s"
 COWOPT=(); [ -n "$COW_MB" ] && COWOPT=(-f "$COW_MB")
-T_SNAP=$(date -u +%FT%T.%3NZ)
-for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
+# Snapshot set: with the disk2glance build of dattobd (hold_thaw, patches/dattobd-hold-thaw.patch)
+# each filesystem stays frozen after its snapshot until all are taken, so the snapshots are one
+# point in time; writes wait for the whole set (0.2-0.3 s for five filesystems). The root
+# filesystem goes last and nothing is written to disk until the release. If the set takes longer
+# than D2G_SNAP_HOLD_MS, the module thaws everything itself: the pass goes on, but the snapshots
+# are taken one after another, as with a stock dattobd.
+snap_order=()
+for t in ${TARGETS[@]+"${TARGETS[@]}"}; do read -r tdev tmnt <<<"$t"; [ "$tmnt" = / ] || snap_order+=("$t"); done
+for t in ${TARGETS[@]+"${TARGETS[@]}"}; do read -r tdev tmnt <<<"$t"; [ "$tmnt" = / ] && snap_order+=("$t"); done
+SNAP_SET=0; snap_log=()
+if [ ${#snap_order[@]} -gt 1 ] && [ -w "$HOLD/hold_thaw" ]; then
+  SNAP_SET=1; echo "${D2G_SNAP_HOLD_MS:-3000}" >"$HOLD/hold_timeout_ms"; echo 1 >"$HOLD/hold_thaw"
+fi
+T_SNAP=$(date -u +%FT%T.%3NZ); ts0=$(date +%s%N)
+for t in ${snap_order[@]+"${snap_order[@]}"}; do
   read -r tdev tmnt <<<"$t"; m=$(next_minor); t0=$(date +%s%N)
-  dbdctl setup-snapshot ${COWOPT[@]+"${COWOPT[@]}"} "$tdev" "${tmnt%/}/$COW" "$m" || die "setup-snapshot $tdev failed"
+  dbdctl setup-snapshot ${COWOPT[@]+"${COWOPT[@]}"} "$tdev" "${tmnt%/}/$COW" "$m" || { hold_release; die "setup-snapshot $tdev failed"; }
   MINORS+=("$m"); SNAPDEV[$tdev]=/dev/datto$m
-  log "snapshot $tdev ($tmnt) -> /dev/datto$m in $(( ($(date +%s%N) - t0) / 1000000 )) ms"
+  snap_log+=("snapshot $tdev ($tmnt) -> /dev/datto$m in $(( ($(date +%s%N) - t0) / 1000000 )) ms")
 done
+held=$(cat "$HOLD/release_held" 2>/dev/null || echo 0); hold_release
+for l in ${snap_log[@]+"${snap_log[@]}"}; do log "$l"; done
+if [ "$SNAP_SET" != 0 ]; then
+  ms=$(( ($(date +%s%N) - ts0) / 1000000 ))
+  if [ "$held" = ${#snap_order[@]} ]; then log "snapshot set of ${#snap_order[@]} filesystems, one point in time; writes waited $ms ms"
+  else log "WARN: snapshot set took $ms ms > D2G_SNAP_HOLD_MS=${D2G_SNAP_HOLD_MS:-3000}: dattobd thawed the filesystems early, the snapshots are not one point in time"; fi
+elif [ ${#snap_order[@]} -gt 1 ]; then
+  log "WARN: this dattobd has no snapshot sets (hold_thaw): ${#snap_order[@]} snapshots taken one after another, not one point in time"
+fi
 fb_remove   # the copy has the unit, the source no longer does
 
 # --- segment map of the whole disk: "disk_off len src src_off", contiguous ------------

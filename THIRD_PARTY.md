@@ -9,11 +9,11 @@
 |---|---|---|---|---|
 | `disk2glance.sh` → `/opt/disk2glance/bin/disk2glance` | агент | этот репозиторий | — | проект |
 | `install.sh` | установщик | этот репозиторий | — | проект |
-| `modules/<ядро>/dattobd.ko` | модуль ядра dattobd 0.12.2 (снапшоты блочных устройств с COW) | https://github.com/datto/dattobd, тег `v0.12.2`, коммит `90cde6e468052fadbf4dabe5bd3cafc0a2fe700f` | собран DKMS **под root** на сборочной ВМ того же дистрибутива (см. таблицу ниже), отладочная информация удалена `strip --strip-debug` | GPL-2.0-only |
+| `modules/<ядро>/dattobd.ko` | модуль ядра dattobd 0.12.2 (снапшоты блочных устройств с COW) с доработкой «набор снапшотов» | https://github.com/datto/dattobd, тег `v0.12.2`, коммит `90cde6e468052fadbf4dabe5bd3cafc0a2fe700f`, плюс доработки `patches/dattobd-hold-thaw.patch` (набор снапшотов: параметры `hold_thaw`, `release_held`, `hold_timeout_ms`; `src/tracer.c`, `src/tracer.h`, `src/module_control.c`) и `patches/dattobd-write-zeroes.patch` (исправление проверки `REQ_OP_WRITE_ZEROES` на ядрах 6.0+; `src/bio_helper.c`, `src/tracer.c`) | с 0.8.0 — с наложенными доработками; собран **под root** на сборочной ВМ того же дистрибутива (см. таблицу ниже), отладочная информация удалена `strip --strip-debug` | GPL-2.0-only |
 | `bin/dbdctl` | утилита управления снапшотами dattobd | тот же тег dattobd (`app/dbdctl.c` + `lib/libdattobd.c`) | собрана **статически** на Ubuntu 24.04: `gcc -O2 -static -I lib -I src app/dbdctl.c lib/libdattobd.a`, gcc 13.3.0, glibc 2.39 | dbdctl — GPL-2.0, libdattobd — LGPL-2.1 |
 | `bin/update-img` | утилита dattobd для инкрементального обновления образа (агентом не вызывается) | тот же тег (`utils/update-img.c`) | собрана статически, как `dbdctl` | GPL-2.0 |
 | `bin/jq` | jq 1.7.1, разбор JSON (Keystone/Glance API) | https://github.com/jqlang/jq/releases/tag/jq-1.7.1, файл `jq-linux-amd64` | скачан с официального релиза, sha256 сверен с `sha256sum.txt` релиза | MIT |
-| `src/dattobd/` | исходники dattobd того же тега | архив `https://github.com/datto/dattobd/archive/refs/tags/v0.12.2.tar.gz` | без изменений | GPL-2.0 / LGPL-2.1 |
+| `src/dattobd/` | исходники dattobd того же тега, из которых собраны модули | архив `https://github.com/datto/dattobd/archive/refs/tags/v0.12.2.tar.gz` | с наложенными доработками из `src/patches/` (файлы доработок лежат рядом) | GPL-2.0 / LGPL-2.1 |
 
 Серверный бандл `d2g-server-<версия>.tar.gz` (оркестратор и приёмник, вариант 2) написан на Python
 и использует только стандартную библиотеку. Из стороннего в нём одна библиотека:
@@ -41,19 +41,24 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 
 ### Готовые модули в бандле
 
-| Ядро | Дистрибутив | Где собран | Пакеты для сборки (из репозиториев дистрибутива) |
+| Ядро | Дистрибутив | Где собран (0.8.0, `build-module.sh` с `patches/`) | Пакеты для сборки (из репозиториев дистрибутива) |
 |---|---|---|---|
-| `6.8.0-134-generic` | Ubuntu 24.04 | на тестовой ВМ, где запущено это ядро | `build-essential`, `dkms`, `linux-headers-6.8.0-134-generic` — archive.ubuntu.com |
-| `6.8.0-146-generic` | Ubuntu 24.04 | на сборочной ВМ Ubuntu 24.04, где это ядро не запущено (`build-module.sh`, кросс-сборка) | `build-essential`, `libelf-dev`, `git`, `linux-headers-6.8.0-146-generic` (+ `System.map` из `linux-modules-6.8.0-146-generic`) — archive.ubuntu.com |
-| `5.15.0-181-generic` | Ubuntu 22.04 | на исходной ВМ, где запущено это ядро (`install.sh --build`, без dkms) | `gcc`, `make`, `linux-headers-5.15.0-181-generic` (уже были на ВМ) — archive.ubuntu.com |
-| `6.12.21-1.red80.x86_64` | RED OS 8 | на тестовой ВМ, где запущено это ядро | `gcc`, `make`, `dkms`, `elfutils-libelf-devel`, `kernel-lt-devel-6.12.21-1.red80` — репозитории RED OS (`base`, `updates`) |
-| `6.12.92-1.red80.x86_64` | RED OS 8 | на сборочной ВМ RED OS 8, работающей на другом ядре (кросс-сборка) | то же + `kernel-lt-devel-6.12.92-1.red80` |
-| `6.12.101-1.red80.x86_64` | RED OS 8 | на сборочной ВМ RED OS 8, где это ядро даже не установлено (кросс-сборка) | то же + `kernel-lt-devel-6.12.101-1.red80` |
-| `6.1.175-1.el7.3.x86_64` | RED OS 7.3 | на тестовой ВМ, где запущено это ядро | `gcc`, `make`, `dkms`, `elfutils-libelf-devel`, `kernel-lt-devel-6.1.175-1.el7.3` — репозитории RED OS (`base`, `updates`, `kernels6`) |
-| `6.1.180-1.el7.3.x86_64` | RED OS 7.3 | на сборочной ВМ RED OS 7.3, работающей на другом ядре (кросс-сборка) | то же + `kernel-lt-devel-6.1.180-1.el7.3` |
-| `6.1.50-1-generic` | Astra Linux SE 1.7.5 | на тестовой ВМ, где запущено это ядро (`build-module.sh`) | `build-essential`, `libelf-dev`, `git`, `linux-headers-6.1.50-1-generic` — замороженный репозиторий Astra 1.7.5 (`download.astralinux.ru/astra/frozen/1.7_x86-64/1.7.5/repository-base`) |
-| `6.1.166-1-generic` | Astra Linux SE 1.8.6 | на тестовой ВМ, где запущено это ядро (`build-module.sh`) | `build-essential`, `libelf-dev`, `git`, `linux-headers-6.1.166-1-generic` — замороженный репозиторий Astra 1.8.6 (`download.astralinux.ru/astra/frozen/1.8_x86-64/1.8.6/main-repository`) |
-| `3.10.0-1160.119.1.el7.x86_64` | CentOS 7.9 | на сборочной ВМ CentOS 7 (`build-module.sh`, без dkms) | `gcc`, `make`, `git`, `elfutils-libelf-devel`, `kernel-devel-3.10.0-1160.119.1.el7` — репозитории CentOS 7 (`updates`, vault.centos.org) |
+| `6.8.0-134-generic` | Ubuntu 24.04 | на ВМ Ubuntu 24.04, где запущено это ядро; набор снапшотов и исправление `WRITE_ZEROES` проверены на нём | `build-essential`, `libelf-dev`, `linux-headers-6.8.0-134-generic` — archive.ubuntu.com |
+| `6.8.0-146-generic` | Ubuntu 24.04 | там же, кросс-сборка | то же + `linux-headers-6.8.0-146-generic` (+ `System.map` из `linux-modules-6.8.0-146-generic`) |
+| `5.15.0-181-generic` | Ubuntu 22.04 | на сборочной ВМ Ubuntu 22.04 (ядро 5.15.0-185), кросс-сборка | `build-essential`, `libelf-dev`, `linux-headers-5.15.0-181-generic` — archive.ubuntu.com |
+| `5.15.0-185-generic` | Ubuntu 22.04 | там же, запущенное ядро; набор проверен | то же + `linux-headers-5.15.0-185-generic` |
+| `6.12.21-1.red80.x86_64` | RED OS 8 | на сборочной ВМ RED OS 8 (ядро 6.12.92), кросс-сборка | `gcc`, `make`, `elfutils-libelf-devel`, `kernel-lt-devel-6.12.21-1.red80` — репозитории RED OS (`base`, `updates`) |
+| `6.12.92-1.red80.x86_64` | RED OS 8 | там же, запущенное ядро; набор и исправление `WRITE_ZEROES` проверены | то же + `kernel-lt-devel-6.12.92-1.red80` |
+| `6.12.101-1.red80.x86_64` | RED OS 8 | там же, кросс-сборка | то же + `kernel-lt-devel-6.12.101-1.red80` |
+| `6.1.175-1.el7.3.x86_64` | RED OS 7.3 | на сборочной ВМ RED OS 7.3, запущенное ядро; набор и исправление `WRITE_ZEROES` проверены | `gcc`, `make`, `elfutils-libelf-devel`, `kernel-lt-devel-6.1.175-1.el7.3` — репозитории RED OS (`base`, `updates`, `kernels6`) |
+| `6.1.180-1.el7.3.x86_64` | RED OS 7.3 | там же, кросс-сборка | то же + `kernel-lt-devel-6.1.180-1.el7.3` |
+| `6.1.50-1-generic` | Astra Linux SE 1.7.5 | на сборочной ВМ Astra 1.7.5, запущенное ядро; набор и исправление `WRITE_ZEROES` проверены | `build-essential`, `libelf-dev`, `linux-headers-6.1.50-1-generic` — замороженный репозиторий Astra 1.7.5 (`download.astralinux.ru/astra/frozen/1.7_x86-64/1.7.5/repository-base`) |
+| `3.10.0-1160.119.1.el7.x86_64` | CentOS 7.9 | на сборочной ВМ CentOS 7, запущенное ядро; механизм набора проверен | `gcc`, `make`, `elfutils-libelf-devel`, `kernel-devel-3.10.0-1160.119.1.el7` — репозитории CentOS 7 (`updates`, vault.centos.org) |
+
+Готового модуля для Astra Linux SE 1.8.6 (`6.1.166-1-generic`) в 0.8.0 нет: модуль 0.7.0 содержал
+ошибку `WRITE_ZEROES`, а это ядро собрано gcc 12, которого нет на сборочной ВМ Astra 1.7. На
+Astra 1.8 модуль собирается на исходной ВМ: `install.sh --build` (нужны `build-essential`,
+`libelf-dev` и `linux-headers-$(uname -r)`), из исходников бандла с обеими доработками.
 
 Модули подписаны локальными ключами DKMS сборочных ВМ, но `strip` удаляет подпись. При
 выключенном Secure Boot это не важно. При включённом модуль нужно подписать ключом, который
