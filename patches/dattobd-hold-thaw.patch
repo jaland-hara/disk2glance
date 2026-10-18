@@ -1,0 +1,135 @@
+Snapshot set for dattobd v0.12.2 (disk2glance): hold_thaw / release_held / hold_timeout_ms.
+Apply in the dattobd source root: patch -p1 < dattobd-hold-thaw.patch. See docs/multi-disk.md.
+
+diff -ru a/src/module_control.c b/src/module_control.c
+--- a/src/module_control.c	2026-10-18 22:22:24
++++ b/src/module_control.c	2026-10-18 22:22:49
+@@ -149,6 +149,8 @@
+ {
+         LOG_DEBUG("module exit");
+ 
++        tracer_release_held_on_exit();
++
+         //restore_system_call_table();
+ 
+         unregister_ftrace_hooks();
+diff -ru a/src/tracer.c b/src/tracer.c
+--- a/src/tracer.c	2026-10-18 22:22:24
++++ b/src/tracer.c	2026-10-18 22:22:49
+@@ -24,6 +24,9 @@
+ #include "tracing_params.h"
+ #include <linux/blk-mq.h>
+ #include <linux/version.h>
++#include <linux/moduleparam.h>
++#include <linux/mutex.h>
++#include <linux/workqueue.h>
+ #include "stack_limits.h"
+ #ifdef HAVE_BLK_ALLOC_QUEUE
+ // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
+@@ -1273,6 +1276,85 @@
+         return 0;
+ }
+ 
++/*
++ * Snapshot set (disk2glance): several snapshots that share one point in time.
++ *
++ * With hold_thaw=1 a block device frozen to start tracing is left frozen. Snapshots of the
++ * other devices are then set up one by one (their COW files are written while they are still
++ * thawed); writing anything to release_held thaws all held devices at once. Nothing can be
++ * written to a device after its snapshot point until the release, so every write captured by a
++ * later snapshot happened before the release, and the set is one consistent point in time.
++ * hold_timeout_ms thaws everything anyway if the caller dies before releasing.
++ */
++static bool hold_thaw;
++module_param(hold_thaw, bool, 0644);
++MODULE_PARM_DESC(hold_thaw, "leave devices frozen after starting tracing until release_held is written");
++static unsigned int hold_timeout_ms = 10000;
++module_param(hold_timeout_ms, uint, 0644);
++MODULE_PARM_DESC(hold_timeout_ms, "thaw held devices after this many ms even without release_held");
++
++#define DATTO_MAX_HELD 64
++static struct block_device *held_bdev[DATTO_MAX_HELD];
++static struct super_block *held_sb[DATTO_MAX_HELD];
++static int held_count;
++static DEFINE_MUTEX(held_lock);
++
++static int __try_thaw_bdev(struct block_device* bdev, struct super_block* sb);
++
++static void release_held_devices(const char *why){
++        int i, n;
++        mutex_lock(&held_lock);
++        n = held_count;
++        for(i = n - 1; i >= 0; i--) __try_thaw_bdev(held_bdev[i], held_sb[i]);
++        held_count = 0;
++        mutex_unlock(&held_lock);
++        if(n) LOG_DEBUG("thawed %d held device(s): %s", n, why);
++        if(n && why[0] == 't') LOG_WARN("hold_timeout_ms expired: thawed %d held device(s)", n);
++}
++
++static void held_timeout_fn(struct work_struct *work){
++        release_held_devices("timeout");
++}
++static DECLARE_DELAYED_WORK(held_timeout_work, held_timeout_fn);
++
++static bool hold_device(struct block_device *bdev, struct super_block *sb){
++        bool ok = false;
++        mutex_lock(&held_lock);
++        if(held_count < DATTO_MAX_HELD){
++                if(held_count == 0) schedule_delayed_work(&held_timeout_work, msecs_to_jiffies(hold_timeout_ms));
++                held_bdev[held_count] = bdev;
++                held_sb[held_count] = sb;
++                held_count++;
++                ok = true;
++        }
++        mutex_unlock(&held_lock);
++        return ok;
++}
++
++static int release_held_set(const char *val, const struct kernel_param *kp){
++        cancel_delayed_work_sync(&held_timeout_work);
++        release_held_devices("release");
++        return 0;
++}
++static int release_held_get(char *buf, const struct kernel_param *kp){
++        int n;
++        mutex_lock(&held_lock);
++        n = held_count;
++        mutex_unlock(&held_lock);
++        return sprintf(buf, "%d\n", n);
++}
++static const struct kernel_param_ops release_held_ops = {
++        .set = release_held_set,
++        .get = release_held_get,
++};
++module_param_cb(release_held, &release_held_ops, NULL, 0644);
++MODULE_PARM_DESC(release_held, "write: thaw all held devices; read: how many are held");
++
++void tracer_release_held_on_exit(void){
++        cancel_delayed_work_sync(&held_timeout_work);
++        release_held_devices("module exit");
++}
++
+ /**
+  * __tracer_transition_tracing() - Starts or ends tracing on @bdev depending
+  *                                 on whether @dev is defined.  The @bdev is
+@@ -1369,6 +1451,10 @@
+                 smp_wmb();
+         }
+         if(freezed){
++                if(start_tracing && hold_thaw && hold_device(bdev, sb)){
++                        LOG_DEBUG("tracing started, device left frozen until release_held");
++                        return 0;
++                }
+                 ret = __try_thaw_bdev(bdev, sb);
+                 // thaws failures are ignored as we can't undo what we have already done
+         }
+diff -ru a/src/tracer.h b/src/tracer.h
+--- a/src/tracer.h	2026-10-18 22:22:24
++++ b/src/tracer.h	2026-10-18 22:22:49
+@@ -68,4 +68,6 @@
+ void __tracer_dormant_to_active(struct snap_device *dev,
+                                 const char __user *user_mount_path);
+ 
++void tracer_release_held_on_exit(void);
++
+ #endif /* TRACER_H_ */
