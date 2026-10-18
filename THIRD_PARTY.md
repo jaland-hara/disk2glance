@@ -70,7 +70,6 @@ ebb6a2bd548a9375604edbb08da9bbc275def7bb2cc139d0ed695b6194f68790  bin/dbdctl
 | `findmnt`, `flock` | util-linux | точки монтирования и ФС разделов, защита от параллельного запуска |
 | `dmsetup` (только при LVM) | device-mapper (устанавливается вместе с lvm2) | таблица сегментов LV: где экстенты LV расположены на диске |
 | `sync` | coreutils | запись изменённых данных из кэша на диск перед снапшотом |
-
 | `systemd-run` (только с `--detach`) | systemd | запуск агента отдельным юнитом вне сессии пользователя |
 | `systemd-detect-virt` (необязательно) | systemd | какой гипервизор сейчас (только для сообщения в `--check`) |
 | `lsinitrd` / `lsinitramfs` (необязательно) | dracut / initramfs-tools | есть ли драйверы virtio в initramfs |
