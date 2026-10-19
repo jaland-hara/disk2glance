@@ -66,7 +66,7 @@ disk2glance копирует диск виртуальной машины в о�
   выполнить
 
   ```bash
-  tar xzf disk2glance-0.8.2.tar.gz && cd disk2glance-0.8.2
+  tar xzf disk2glance-0.9.0.tar.gz && cd disk2glance-0.9.0
   sudo ./install.sh                         # создаст /etc/disk2glance/{openrc,props.json,disk2glance.conf}
   sudo vi /etc/disk2glance/openrc           # вписать учётные данные целевого облака
   sudo disk2glance --check                  # проверка без переноса
