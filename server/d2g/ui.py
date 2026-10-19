@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 """
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 JOB_RE = re.compile(r"^j[0-9a-f]{8}$")
+DISK_RE = re.compile(r"^(/dev/)?[a-z][a-z0-9]{1,15}$")
 RX_RE = re.compile(r"^rx[0-9]{1,3}$")
 TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,23}$")
 ARG_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
@@ -196,8 +197,7 @@ def state(c):
     d = O.db()
     rx = []
     for r in d.execute("SELECT * FROM receivers WHERE state!='deleted' ORDER BY local DESC, created"):
-        n = d.execute("SELECT count(*) FROM jobs WHERE receiver=? AND state NOT IN ('finished','deleted')",
-                      (r["name"],)).fetchone()[0]
+        n = O.rx_volumes(r["name"])
         info = json.loads(r["info"] or "{}")
         rx.append({"name": r["name"], "dns": O.rx_dns(c, r["name"]), "state": r["state"] if r["state"] != "up" or O.rx_up(r) else "down",
                    "local": bool(r["local"]), "flavor": r["flavor"], "az": r["az"], "grey_ip": r["grey_ip"], "fip": r["fip"],
@@ -210,7 +210,7 @@ def state(c):
         agents.append({"name": a["name"], "state": "revoked" if a["revoked"] else ("enrolled" if a["cert_serial"] else "token"),
                        "seen": a["last_seen"], "peer": a["peer"], "path": a["path"], "threads": a["threads"],
                        "os": inv.get("os"), "kernel": inv.get("kernel"), "hostname": inv.get("hostname"),
-                       "disk_bytes": inv.get("disk_bytes"), "module": inv.get("module"), "version": inv.get("agent_version"),
+                       "disk_bytes": inv.get("disk_bytes"), "disks": inv.get("disks") or [], "module": inv.get("module"), "version": inv.get("agent_version"),
                        "command": a["command"], "report": {"rc": rep.get("rc"), "summary": rep.get("summary"),
                                                            "command": rep.get("command"), "at": a["report_at"]},
                        "token_exp": a["token_exp"]})
@@ -223,7 +223,9 @@ def state(c):
         jobs.append({k: j[k] for k in ("id", "agent", "receiver", "volume_id", "az", "disk_bytes", "part_bytes", "state",
                                        "created", "sync_every", "parts", "pass_no", "pass_start", "pass_parts", "last_part",
                                        "synced_at", "synced_snapshot", "server_id", "vm_name")}
-                    | {"nparts": n, "rate": rate, "target": j["target"] or "home"})
+                    | {"nparts": n, "rate": rate, "target": j["target"] or "home",
+                       "disks": [{k: x[k] for k in ("idx", "dev", "volume_id", "disk_bytes", "rx_state", "parts", "synced_snapshot")}
+                                 for x in O.job_disks(j["id"])]})
     from . import targets as T
     targets = [{"name": "home", "title": "проект оркестратора", "mode": "home", "project": c.get("project"), "region": "",
                 "az": c.get("az"), "network": c.get("network"), "check_ok": 1}]
@@ -418,7 +420,7 @@ def action(who, p, b, ip=""):
         for line in out.splitlines():
             if line.startswith("# public") or line.startswith("# grey"):
                 kind = line[2:].rstrip(":")
-            elif line.startswith("curl ") and kind:
+            elif line.startswith("d=$(mktemp") and kind:
                 cmds.append({"kind": kind, "command": line})
         return {"commands": cmds, "valid_min": 60}
     if len(p) == 3 and p[0] == "agent" and p[2] in ("revoke", "sync", "uninstall"):
@@ -447,6 +449,8 @@ def action(who, p, b, ip=""):
             argv += ["--every", str(int(b["every"]))]
         if b.get("size_gb"):
             argv += ["--size-gb", str(int(b["size_gb"]))]
+        if b.get("disks"):
+            argv += ["--disks", ",".join(need({"d": x}, "d", DISK_RE) for x in str(b["disks"]).split(","))]
         return {"task": run_task(who, f"новое задание: {argv[2]}", argv)}
     if len(p) == 3 and p[0] == "job":
         jid = need({"j": p[1]}, "j", JOB_RE)

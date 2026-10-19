@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS jobs (
   rx_state TEXT, rx_released INTEGER DEFAULT 0, parts INTEGER DEFAULT 0, pass_no INTEGER DEFAULT 0,
   pass_start INTEGER, pass_parts INTEGER DEFAULT 0, last_part INTEGER, synced_at INTEGER, synced_snapshot TEXT,
   server_id TEXT, vm_name TEXT);
+CREATE TABLE IF NOT EXISTS disks (
+  id TEXT PRIMARY KEY, job TEXT, idx INTEGER, dev TEXT, src_serial TEXT, volume_id TEXT, serial TEXT, disk_bytes INTEGER,
+  rx_state TEXT, rx_released INTEGER DEFAULT 0, parts INTEGER DEFAULT 0, pass_no INTEGER DEFAULT 0, pass_start INTEGER,
+  pass_parts INTEGER DEFAULT 0, last_part INTEGER, synced_at INTEGER, synced_snapshot TEXT);
 CREATE TABLE IF NOT EXISTS events (ts INTEGER, who TEXT, what TEXT);
 CREATE TABLE IF NOT EXISTS targets (
   name TEXT PRIMARY KEY, title TEXT, mode TEXT, project TEXT, region TEXT, conf TEXT, created INTEGER,
@@ -65,6 +69,15 @@ def db_init():
             db().execute(ddl)
         except Exception:  # noqa: BLE001
             pass
+    # jobs made before 0.9 have one disk: its row keeps the job id (the receivers know the volume by it)
+    for j in db().execute("SELECT * FROM jobs WHERE id NOT IN (SELECT job FROM disks)").fetchall():
+        a = db().execute("SELECT inventory FROM agents WHERE name=?", (j["agent"],)).fetchone()
+        inv = json.loads(a["inventory"] or "{}") if a else {}
+        db().execute("INSERT INTO disks (id, job, idx, dev, src_serial, volume_id, serial, disk_bytes, rx_state, rx_released, parts, "
+                     "pass_no, pass_start, pass_parts, last_part, synced_at, synced_snapshot) VALUES (?,?,0,?,'',?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (j["id"], j["id"], inv.get("disk", "/dev/vda"), j["volume_id"], j["serial"], j["disk_bytes"], j["rx_state"],
+                      j["rx_released"], j["parts"], j["pass_no"], j["pass_start"], j["pass_parts"], j["last_part"],
+                      j["synced_at"], j["synced_snapshot"]))
 
 
 def actor():
@@ -84,8 +97,26 @@ def rx_dns(c, name):
     return f"{name}.{c['domain']}"
 
 
+def job_disks(jid):
+    return db().execute("SELECT * FROM disks WHERE job=? ORDER BY idx", (jid,)).fetchall()
+
+
 def nparts(j):
-    return (j["disk_bytes"] + j["part_bytes"] - 1) // j["part_bytes"]
+    ds = job_disks(j["id"]) or [j]
+    return sum((d["disk_bytes"] + j["part_bytes"] - 1) // j["part_bytes"] for d in ds)
+
+
+def rx_volumes(name):
+    """volumes of open jobs on a receiver (a job has one per disk)"""
+    return db().execute("SELECT count(*) FROM disks d JOIN jobs j ON j.id=d.job WHERE j.receiver=? "
+                        "AND j.state NOT IN ('finished','deleted')", (name,)).fetchone()[0]
+
+
+def version_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).split("-")[0].split("."))
+    except ValueError:
+        return (999,)   # "dev": a build from the repository
 
 
 # --- nginx: SNI routing on :443 -----------------------------------------------------------------
@@ -141,6 +172,9 @@ class OrchHandler(C.Handler):
         if p == ["v1", "ca"]:
             with open(f"{PKI}/ca.crt") as f:
                 return self.reply(200, {"ca": f.read()})
+        if p == ["v1", "ca.pem"]:
+            with open(f"{PKI}/ca.crt", "rb") as f:
+                return self.reply(200, raw=f.read(), ctype="application/x-pem-file")
         if p == ["install.sh"]:
             return self.reply(200, raw=install_script(c).encode(), ctype="text/x-shellscript")
         if p[:2] == ["v1", "pkg"] and len(p) == 3 and p[2] in ("agent.tar.gz", "server.tar.gz"):
@@ -162,6 +196,8 @@ class OrchHandler(C.Handler):
                 if not a["command"]:
                     return self.reply(200, {})
                 return self.reply(200, {"id": a["command_id"], "command": a["command"], "threads": a["threads"]})
+            if p == ["v1", "agent", "inventory"] and method == "POST":
+                return self.reply(200, agent_inventory(name, self.body_json()))
             if p == ["v1", "agent", "report"] and method == "POST":
                 b = self.body_json()
                 a = db().execute("SELECT command_id FROM agents WHERE name=?", (name,)).fetchone()
@@ -222,14 +258,36 @@ class OrchHandler(C.Handler):
             addrs.append(["ctl-grey", c["grey_ip"]])
         if a["path"] != "auto":
             addrs = [x for x in addrs if x[0] == a["path"]] or addrs
-        return self.reply(200, {"id": j["id"], "disk_bytes": j["disk_bytes"], "part_bytes": j["part_bytes"],
+        ds = job_disks(j["id"])
+        return self.reply(200, {"id": j["id"], "disk_bytes": ds[0]["disk_bytes"], "part_bytes": j["part_bytes"],
                                 "block_bytes": j["part_bytes"] // BLOCKS_PER_PART, "state": j["state"],
                                 "pass_no": j["pass_no"], "threads": a["threads"],
+                                "disks": [{"id": d["id"], "dev": d["dev"], "serial": d["src_serial"] or "",
+                                           "disk_bytes": d["disk_bytes"]} for d in ds],
                                 "receiver": {"name": rx_dns(c, r["name"]), "addrs": addrs}})
 
 
+def agent_inventory(name, b):
+    """The agent's list of disks (sent when its poller starts and every hour) and its versions."""
+    a = db().execute("SELECT inventory FROM agents WHERE name=?", (name,)).fetchone()
+    inv = json.loads(a["inventory"] or "{}")
+    old = [(x.get("dev"), x.get("bytes")) for x in inv.get("disks") or []]
+    disks = [x for x in b.get("disks") or [] if isinstance(x, dict) and x.get("dev") and x.get("bytes")]
+    if disks:
+        inv["disks"] = disks
+        inv["disk"], inv["disk_bytes"] = disks[0]["dev"], disks[0]["bytes"]
+    for k in ("kernel", "module", "agent_version"):
+        if b.get(k):
+            inv[k] = b[k]
+    db().execute("UPDATE agents SET inventory=? WHERE name=?", (json.dumps(inv), name))
+    new = [(x.get("dev"), x.get("bytes")) for x in inv.get("disks") or []]
+    if new != old:
+        event(name, "disks: " + ", ".join(f"{d} {n / 2**30:.0f} GiB" for d, n in new))
+    return {"disks": len(new)}
+
+
 def rx_heartbeat(c, name, b):
-    """Receiver state in, job specs out."""
+    """Receiver state in, volume specs out (one per disk of a job; the receiver calls them jobs)."""
     db().execute("UPDATE receivers SET last_seen=?, state=CASE WHEN state IN ('creating','joined','up','down') "
                  "THEN 'up' ELSE state END, info=? WHERE name=?",
                  (now(), json.dumps({k: b.get(k) for k in ("load", "root", "devices")}), name))
@@ -240,23 +298,43 @@ def rx_heartbeat(c, name, b):
                           "('attaching','ready','receiving','synced','finishing','deleting')", (name,)).fetchall():
         a = db().execute("SELECT cert_serial, revoked FROM agents WHERE name=?", (j["agent"],)).fetchone()
         st = "active" if j["state"] in ACTIVE else "release"
-        if j["state"] == "attaching" and j["serial"] not in devs:
-            continue
-        specs.append({"id": j["id"], "agent": j["agent"], "agent_serial": "" if not a or a["revoked"] else a["cert_serial"],
-                      "serial": j["serial"], "disk_bytes": j["disk_bytes"], "part_bytes": j["part_bytes"], "state": st})
-        r = rep.get(j["id"])
-        if not r:
-            continue
-        upd = {"rx_state": r["state"], "rx_released": r["released"], "parts": r["parts"], "pass_no": r["pass_no"],
-               "pass_start": r["pass_start"], "pass_parts": r["pass_parts"], "last_part": r["last_part"],
-               "synced_at": r["synced_at"], "synced_snapshot": r["synced_snapshot"]}
-        if j["state"] in ACTIVE:
-            upd["state"] = r["state"]
-            if j["state"] == "attaching" and j["autostart"]:
-                queue_command(j["agent"], "sync")
-                event("orchestrator", f"job {j['id']}: volume is served by {name}, first pass queued")
-        db().execute("UPDATE jobs SET " + ", ".join(f"{k}=?" for k in upd) + " WHERE id=?", (*upd.values(), j["id"]))
+        for d in job_disks(j["id"]):
+            if not d["volume_id"] or (j["state"] == "attaching" and d["serial"] not in devs):
+                continue
+            specs.append({"id": d["id"], "agent": j["agent"], "agent_serial": "" if not a or a["revoked"] else a["cert_serial"],
+                          "serial": d["serial"], "disk_bytes": d["disk_bytes"], "part_bytes": j["part_bytes"], "state": st})
+            r = rep.get(d["id"])
+            if r:
+                upd = {"rx_state": r["state"], "rx_released": r["released"], "parts": r["parts"], "pass_no": r["pass_no"],
+                       "pass_start": r["pass_start"], "pass_parts": r["pass_parts"], "last_part": r["last_part"],
+                       "synced_at": r["synced_at"], "synced_snapshot": r["synced_snapshot"]}
+                db().execute("UPDATE disks SET " + ", ".join(f"{k}=?" for k in upd) + " WHERE id=?", (*upd.values(), d["id"]))
+        rollup(j, name)
     return {"jobs": specs}
+
+
+def rollup(j, rx_name=""):
+    """Job state from its disks: synced only when every volume holds the same snapshot set."""
+    ds = job_disks(j["id"])
+    if not ds or any(d["rx_state"] is None for d in ds):
+        return   # still attaching (or the receiver has not reported every volume yet)
+    states = {d["rx_state"] for d in ds}
+    snaps = {d["synced_snapshot"] for d in ds}
+    upd = {"rx_released": int(all(d["rx_released"] for d in ds)), "parts": sum(d["parts"] or 0 for d in ds),
+           "pass_no": min(d["pass_no"] or 0 for d in ds), "pass_parts": sum(d["pass_parts"] or 0 for d in ds),
+           "pass_start": min((d["pass_start"] for d in ds if d["pass_start"]), default=None),
+           "last_part": max((d["last_part"] for d in ds if d["last_part"]), default=None),
+           # mixed states or snapshots: a pass is going on or was broken off — not synced
+           "rx_state": "synced" if states == {"synced"} and len(snaps) == 1 else "ready" if states == {"ready"} else "receiving"}
+    if upd["rx_state"] == "synced":
+        upd["synced_at"], upd["synced_snapshot"] = max(d["synced_at"] or 0 for d in ds), snaps.pop()
+    if j["state"] in ACTIVE:
+        upd["state"] = upd["rx_state"]
+    db().execute("UPDATE jobs SET " + ", ".join(f"{k}=?" for k in upd) + " WHERE id=?", (*upd.values(), j["id"]))
+    # the command only after the state: an agent polling right now must find the job ready
+    if j["state"] == "attaching" and upd.get("state") not in (None, "attaching") and j["autostart"]:
+        queue_command(j["agent"], "sync")
+        event("orchestrator", f"job {j['id']}: {len(ds)} volume(s) served by {rx_name}, first pass queued")
 
 
 def queue_command(agent, command):
@@ -279,23 +357,41 @@ def scheduler():
         time.sleep(30)
 
 
+def ca_sha256():
+    with open(f"{PKI}/ca.crt", "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def install_command(c, ip, tok, name):
+    """One line for the source VM. The CA is fetched without TLS checks and accepted only by its
+    SHA-256 (sha256sum), then everything goes over TLS checked against it. Works with any curl
+    (CentOS 7 has 7.29: no --pinnedpubkey, no --connect-to; --resolve is there)."""
+    n = c["ctl_name"]
+    return (f"d=$(mktemp -d) && curl -fsSk --resolve {n}:443:{ip} https://{n}/v1/ca.pem -o $d/ca.pem && "
+            f"echo '{ca_sha256()}  '$d/ca.pem | sha256sum -c --quiet && "
+            f"curl -fsS --cacert $d/ca.pem --resolve {n}:443:{ip} https://{n}/install.sh | sudo sh -s -- {ip} {tok} {name}")
+
+
 def install_script(c):
-    pin = C.pubkey_pin(f"{PKI}/ctl.crt")
+    with open(f"{PKI}/ca.crt") as f:
+        ca = f.read().strip()
     return f"""#!/bin/sh
 # disk2glance agent installer, generated by the d2g orchestrator {c['ctl_name']}
-# usage: curl ... https://{c['ctl_name']}/install.sh | sudo sh -s -- ADDRESS TOKEN NAME
+# usage: curl --cacert ca.pem --resolve {c['ctl_name']}:443:ADDRESS https://{c['ctl_name']}/install.sh | sudo sh -s -- ADDRESS TOKEN NAME
 set -eu
 ADDR=$1 TOKEN=$2 NAME=$3
 CTL={c['ctl_name']}
-PIN='{pin}'
 [ "$(id -u)" = 0 ] || {{ echo "run as root" >&2; exit 1; }}
 d=$(mktemp -d)
 cd "$d"
-curl -fsS -k --pinnedpubkey "$PIN" --connect-to "$CTL:443:$ADDR:443" "https://$CTL/v1/pkg/agent.tar.gz" -o agent.tgz
+cat >ca.pem <<'CA'
+{ca}
+CA
+curl -fsS --cacert ca.pem --resolve "$CTL:443:$ADDR" "https://$CTL/v1/pkg/agent.tar.gz" -o agent.tgz
 tar xzf agent.tgz
 cd disk2glance-*
 ./install.sh
-/opt/disk2glance/bin/disk2rx --enroll --name "$NAME" --server "$CTL" --connect "$ADDR" --pin "$PIN" --token "$TOKEN"
+/opt/disk2glance/bin/disk2rx --enroll --name "$NAME" --server "$CTL" --connect "$ADDR" --ca "$d/ca.pem" --token "$TOKEN"
 cd /
 rm -rf "$d"
 """
@@ -510,7 +606,7 @@ def user_data(c, name, token, ctl_addr=None):
         ca = f.read()
     ca_ind = "".join("      " + ln + "\n" for ln in ca.strip().splitlines())
     join = json.dumps({"name": name, "token": token, "ctl_name": c["ctl_name"], "ctl_addr": ctl_addr})
-    fetch = (f"curl -fsS --cacert /etc/d2g/pki/ca.crt --connect-to {c['ctl_name']}:443:{ctl_addr}:443 "
+    fetch = (f"curl -fsS --cacert /etc/d2g/pki/ca.crt --resolve {c['ctl_name']}:443:{ctl_addr} "
              f"https://{c['ctl_name']}/v1/pkg/server.tar.gz -o s.tgz")
     return f"""#cloud-config
 write_files:
@@ -611,8 +707,7 @@ def cmd_receiver(a):
     c = conf()
     if a.op == "list":
         for r in db().execute("SELECT * FROM receivers WHERE state!='deleted' ORDER BY created"):
-            n = db().execute("SELECT count(*) FROM jobs WHERE receiver=? AND state NOT IN ('finished','deleted')",
-                             (r["name"],)).fetchone()[0]
+            n = rx_volumes(r["name"])
             st = r["state"] if r["state"] != "up" or rx_up(r) else "down"
             seen = f"{now() - r['last_seen']} s ago" if r["last_seen"] else "never"
             info = json.loads(r["info"] or "{}")
@@ -655,12 +750,10 @@ def cmd_agent(a):
         d.execute("UPDATE agents SET token_hash=?, token_exp=?, path=?, threads=? WHERE name=?",
                   (h(tok), now() + TOKEN_TTL, a.path, a.threads, a.name))
         event(actor(), f"agent {a.name}: enrollment token issued")
-        pin = C.pubkey_pin(PKI + "/ctl.crt")
-        print(f"# valid for {TOKEN_TTL // 60} min, once. On the source VM, as root (pick the address it can reach):")
+        print(f"# valid for {TOKEN_TTL // 60} min, once. On the source VM (pick the address it can reach):")
         for kind, ip in (("public", c.get("public_ip")), ("grey", c["grey_ip"])):
             if ip:
-                print(f"# {kind}:\ncurl -fsS -k --pinnedpubkey '{pin}' --connect-to {c['ctl_name']}:443:{ip}:443 "
-                      f"https://{c['ctl_name']}/install.sh | sudo sh -s -- {ip} {tok} {a.name}")
+                print(f"# {kind}:\n{install_command(c, ip, tok, a.name)}")
     elif a.op == "list":
         for r in d.execute("SELECT * FROM agents ORDER BY name"):
             inv = json.loads(r["inventory"] or "{}")
@@ -668,7 +761,9 @@ def cmd_agent(a):
             seen = f"{now() - r['last_seen']} s ago" if r["last_seen"] else "never"
             rep = json.loads(r["last_report"] or "{}")
             print(f"{r['name']:<12} {st:<9} seen {seen:<12} from {r['peer'] or '-':<15} path {r['path']:<8} "
-                  f"{inv.get('os', '')} {inv.get('kernel', '')} disk {int(inv.get('disk_bytes', 0)) / 2**30:.0f} GiB  "
+                  f"{inv.get('os', '')} {inv.get('kernel', '')} "
+                  + (" ".join(f"{x['dev'].rsplit('/', 1)[-1]}:{int(x['bytes']) / 2**30:.0f}G" for x in inv["disks"]) if inv.get("disks")
+                     else f"disk {int(inv.get('disk_bytes', 0)) / 2**30:.0f} GiB") + "  "
                   f"cmd {r['command'] or '-'}  last: rc={rep.get('rc', '-')} {rep.get('summary', '')}")
     elif a.op == "revoke":
         d.execute("UPDATE agents SET revoked=1, token_hash=NULL WHERE name=?", (a.name,))
@@ -689,7 +784,9 @@ def job_line(j):
         rate = f", pass {j['pass_parts']} parts changed, {j['pass_parts'] * j['part_bytes'] / 2**20 / max(1, j['last_part'] - j['pass_start']):.0f} MiB/s max"
     synced = time.strftime("%d.%m %H:%M:%S", time.localtime(j["synced_at"])) if j["synced_at"] else "-"
     every = f", every {j['sync_every']} s" if j["sync_every"] else ""
-    return (f"{j['id']}  {j['agent']:<10} {j['state']:<10} -> {(j['target'] or 'home'):<8} rx {j['receiver'] or '-':<4} {j['parts']}/{n} parts{rate}  "
+    nd = len(job_disks(j["id"]))
+    return (f"{j['id']}  {j['agent']:<10} {j['state']:<10} -> {(j['target'] or 'home'):<8} rx {j['receiver'] or '-':<4} "
+            f"{nd} disk{'s' if nd != 1 else ''} {j['disk_bytes'] / 2**30:.0f} GiB {j['parts']}/{n} parts{rate}  "
             f"passes {j['pass_no']}{every}, synced {synced} (snapshot {j['synced_snapshot'] or '-'})"
             + (f"  VM {j['vm_name']}" if j["vm_name"] else ""))
 
@@ -704,7 +801,7 @@ def wait_job(jid, cond, timeout, what):
     die(f"job {jid}: timeout waiting for {what}")
 
 
-def pick_receiver(c, t, az, name=None):
+def pick_receiver(c, t, az, name=None, need=1):
     """A receiver for a job of target t: home receivers (home, transfer mode) or the target's own."""
     from . import targets as T
     where = T.volume_owner(t)
@@ -713,12 +810,12 @@ def pick_receiver(c, t, az, name=None):
         (r["target"] or "home") == where or die(f"receiver {name} is in {r['target']}, the job needs one in {where}")
         r["az"] == az or die(f"receiver {name} is in zone {r['az']}, the job volume is in {az}: one receiver per zone")
         rx_up(r) or die(f"receiver {name} is not up")
+        lim = t["max_volumes"] if where != "home" else c["max_volumes"]
+        rx_volumes(name) + need <= lim or die(f"receiver {name} has {rx_volumes(name)} of {lim} volumes, the job needs {need}")
         return r
     for r in db().execute("SELECT * FROM receivers WHERE az=? AND state='up' AND coalesce(target,'home')=? "
                           "ORDER BY local DESC, created", (az, where)).fetchall():
-        n = db().execute("SELECT count(*) FROM jobs WHERE receiver=? AND state NOT IN ('finished','deleted')",
-                         (r["name"],)).fetchone()[0]
-        if rx_up(r) and n < (t["max_volumes"] if where != "home" else c["max_volumes"]):
+        if rx_up(r) and rx_volumes(r["name"]) + need <= (t["max_volumes"] if where != "home" else c["max_volumes"]):
             return r
     log(f"no receiver with free slots in {where}/{az}: creating one")
     tw = T.tconf(c, where)
@@ -736,6 +833,9 @@ def cmd_job(a):
     if a.op == "show":
         j = d.execute("SELECT * FROM jobs WHERE id=?", (a.arg,)).fetchone() or die("no such job")
         print(job_line(j))
+        for x in job_disks(j["id"]):
+            print(f"  disk {x['idx']} {x['dev']:<10} {x['disk_bytes'] / 2**30:6.1f} GiB  volume {x['volume_id'] or '-'}  "
+                  f"{x['rx_state'] or 'attaching':<9} parts {x['parts']}  synced {x['synced_snapshot'] or '-'}")
         for e in d.execute("SELECT * FROM events WHERE what LIKE ? OR who=? ORDER BY ts", (f"%{a.arg}%", j["agent"])):
             print(" ", time.strftime("%d.%m %H:%M:%S", time.localtime(e["ts"])), e["who"], e["what"])
         return
@@ -756,28 +856,57 @@ def cmd_job(a):
         if d.execute("SELECT 1 FROM jobs WHERE agent=? AND state NOT IN ('finished','deleted')", (a.arg,)).fetchone():
             die(f"agent {a.arg} already has an open job")
         inv = json.loads(ag["inventory"] or "{}")
-        disk = int(inv.get("disk_bytes") or 0) or die("agent did not report its disk size")
+        disks = inv.get("disks") or [{"dev": inv.get("disk") or "/dev/vda", "bytes": int(inv.get("disk_bytes") or 0),
+                                      "serial": "", "boot": True}]
+        if a.disks:
+            want = [x if x.startswith("/dev/") else "/dev/" + x for x in a.disks.split(",") if x]
+            unknown = [x for x in want if x not in {y["dev"] for y in disks}]
+            unknown and die(f"agent {a.arg} has no disk {', '.join(unknown)} (its disks: {', '.join(y['dev'] for y in disks)}; "
+                            f"a new disk is reported within an hour, or at once with 'disk2rx --inventory' on the VM)")
+            if not any(y.get("boot") and y["dev"] in want for y in disks) and not a.force:
+                die("the boot disk is not in the list: the new VM would not start (--force to move only data disks)")
+            disks = [y for y in disks if y["dev"] in want]
+        all(int(y.get("bytes") or 0) > 0 for y in disks) or die("agent did not report its disk sizes")
+        if len(disks) > 1 and version_tuple(inv.get("agent_version", "0")) < (0, 9):
+            die(f"agent {a.arg} is version {inv.get('agent_version')}: jobs with several disks need agent 0.9 or newer "
+                f"(update the agent, or --disks {disks[0]['dev']})")
         t = T.tconf(c, a.target)
         where = T.volume_owner(t)
         cl = T.cloud_for(where)
         rz = a.receiver and not a.az and d.execute("SELECT az FROM receivers WHERE name=?", (a.receiver,)).fetchone()
         az = a.az or (rz and rz["az"]) or (t["az"] if where != "home" else c["az"])   # a named receiver brings its zone
-        r = pick_receiver(c, t, az, a.receiver)
-        gb = max(a.size_gb or 0, (disk + 2**30 - 1) // 2**30)
+        r = pick_receiver(c, t, az, a.receiver, need=len(disks))
         jid = "j" + secrets.token_hex(4)
         vtype = a.type or (t["rx_volume_type"] if where != "home" else c["rx_volume_type"])
-        vid = cl.create_volume(f"d2g-{a.arg}-{jid}", gb, vtype, az,
-                               meta={"d2g_job": jid, "d2g_agent": a.arg}, desc=f"d2g job {jid} for {a.arg}")
-        cl.wait_vol(vid, "available")
+        total = sum(int(y["bytes"]) for y in disks)
         d.execute("INSERT INTO jobs (id, agent, receiver, volume_id, serial, az, disk_bytes, part_bytes, state, created, "
-                  "autostart, sync_every, target) VALUES (?,?,?,?,?,?,?,?,'attaching',?,?,?,?)",
-                  (jid, a.arg, r["name"], vid, vid[:20], az, disk, c["part_mb"] << 20, now(), 0 if a.no_start else 1,
-                   a.every or 0, t["name"]))
-        cl.attach(r["server_id"], vid)
-        event(actor(), f"job {jid}: volume {vid} {gb} GB attached to {r['name']}")
-        j = wait_job(jid, lambda j: j["state"] != "attaching", 180, "the receiver to serve the volume")
-        print(f"job {jid}: agent {a.arg} -> {t['name']} ({t['mode']}), receiver {r['name']}, volume {vid} ({gb} GB), state {j['state']}"
+                  "autostart, sync_every, target) VALUES (?,?,?,NULL,NULL,?,?,?,'attaching',?,?,?,?)",
+                  (jid, a.arg, r["name"], az, total, c["part_mb"] << 20, now(), 0 if a.no_start else 1, a.every or 0, t["name"]))
+        made = []
+        for idx, y in enumerate(disks):
+            did = jid if idx == 0 else f"{jid}-{idx}"
+            b = int(y["bytes"])
+            gb = (b + 2**30 - 1) // 2**30
+            if idx == 0 and a.size_gb:
+                gb = max(gb, a.size_gb)
+            dn = y["dev"].rsplit("/", 1)[-1]
+            vid = cl.create_volume(f"d2g-{a.arg}-{jid}-{dn}", gb, vtype, az,
+                                   meta={"d2g_job": jid, "d2g_agent": a.arg, "d2g_disk": y["dev"]},
+                                   desc=f"d2g job {jid} for {a.arg}: disk {idx} {y['dev']}")
+            d.execute("INSERT INTO disks (id, job, idx, dev, src_serial, volume_id, serial, disk_bytes) VALUES (?,?,?,?,?,?,?,?)",
+                      (did, jid, idx, y["dev"], y.get("serial") or "", vid, vid[:20], b))
+            if idx == 0:
+                d.execute("UPDATE jobs SET volume_id=?, serial=? WHERE id=?", (vid, vid[:20], jid))
+            made.append((vid, gb, y["dev"]))
+        for vid, gb, dev in made:
+            cl.wait_vol(vid, "available")
+            cl.attach(r["server_id"], vid)
+            event(actor(), f"job {jid}: volume {vid} {gb} GB for {dev} attached to {r['name']}")
+        j = wait_job(jid, lambda j: j["state"] != "attaching", 120 + 60 * len(made), "the receiver to serve the volumes")
+        print(f"job {jid}: agent {a.arg} -> {t['name']} ({t['mode']}), receiver {r['name']}, state {j['state']}"
               + ("" if a.no_start else "; first pass queued"))
+        for vid, gb, dev in made:
+            print(f"  {dev:<10} -> volume {vid} ({gb} GB)")
     elif a.op in ("finish", "delete"):
         j = d.execute("SELECT * FROM jobs WHERE id=?", (a.arg,)).fetchone() or die("no such job")
         if a.op == "finish" and j["state"] == "receiving":
@@ -788,59 +917,76 @@ def cmd_job(a):
                 while time.time() - t < 15 and j["state"] == "receiving":
                     time.sleep(1)
                     j = d.execute("SELECT * FROM jobs WHERE id=?", (a.arg,)).fetchone()
-        if a.op == "finish" and j["state"] != "synced" and not a.force:
+        # 'finishing': a finish that failed after the volumes were detached (bad flavor, quota) is resumed
+        if a.op == "finish" and j["state"] not in ("synced", "finishing") and not a.force:
             die(f"job is {j['state']}, not synced (--force builds from whatever is on the volume)")
         if j["state"] in ("finished", "deleted"):
             die(f"job is {j['state']}")
         r = d.execute("SELECT * FROM receivers WHERE name=?", (j["receiver"],)).fetchone()
         t = T.tconf(c, j["target"])
         cl = T.cloud_for(T.volume_owner(t))
+        if a.op == "finish":
+            T.cloud_for(t["name"]).flavor_id(a.flavor)   # before anything is detached
         d.execute("UPDATE jobs SET state=? WHERE id=?", ("finishing" if a.op == "finish" else "deleting", j["id"]))
-        v = cl.vol(j["volume_id"])
-        attached = bool(r) and any(x.get("server_id") == r["server_id"] for x in v.get("attachments", []))
+        ds = [x for x in job_disks(j["id"]) if x["volume_id"]]
+        vids = [x["volume_id"] for x in ds]
+        attached = []
+        for vid in vids:
+            try:
+                v = cl.vol(vid)
+            except NotFound:
+                continue
+            if r and any(x.get("server_id") == r["server_id"] for x in v.get("attachments", [])):
+                attached.append(vid)
         if attached and rx_up(r):   # (a job whose attach failed was never served by the receiver)
-            wait_job(j["id"], lambda x: x["rx_released"] == 1, 60, "the receiver to release the volume")
-        if attached:
-            cl.detach(r["server_id"], j["volume_id"])
-        log(f"volume {j['volume_id']} detached from {j['receiver']}")
+            wait_job(j["id"], lambda x: x["rx_released"] == 1, 60, "the receiver to release the volumes")
+        for vid in attached:
+            cl.detach(r["server_id"], vid)
+            log(f"volume {vid} detached from {j['receiver']}")
         if a.op == "delete":
             if not a.keep_volume:
-                cl.call("DELETE", "volumev3", f"/volumes/{j['volume_id']}")
+                for vid in vids:
+                    try:
+                        cl.call("DELETE", "volumev3", f"/volumes/{vid}")
+                    except NotFound:
+                        pass
             d.execute("UPDATE jobs SET state='deleted' WHERE id=?", (j["id"],))
-            event(actor(), f"job {j['id']}: deleted{' (volume kept)' if a.keep_volume else ''}")
+            event(actor(), f"job {j['id']}: deleted{' (volumes kept)' if a.keep_volume else ''}")
             print(f"job {j['id']}: deleted")
             return
         if t["mode"] == "transfer":
-            # the volume moves to the target project: request with the home account, accept with the target's
-            tr = cl.call("POST", "volumev3", "/os-volume-transfer",
-                         {"transfer": {"volume_id": j["volume_id"], "name": f"d2g {j['id']}"}})["transfer"]
+            # the volumes move to the target project: request with the home account, accept with the target's
             tcl = T.cloud_for(t["name"])
-            try:
-                tcl.call("POST", "volumev3", f"/os-volume-transfer/{tr['id']}/accept",
-                         {"accept": {"auth_key": tr["auth_key"]}})
-            except Exception:
-                cl.call("DELETE", "volumev3", f"/os-volume-transfer/{tr['id']}")
-                d.execute("UPDATE jobs SET state='synced' WHERE id=?", (j["id"],))
-                raise
-            tcl.wait_vol(j["volume_id"], "available")
-            event(actor(), f"job {j['id']}: volume {j['volume_id']} transferred to {t['name']} ({t['project']})")
-            log(f"volume {j['volume_id']} transferred to project {t['project']} ({t['name']})")
+            for vid in vids:
+                tr = cl.call("POST", "volumev3", "/os-volume-transfer",
+                             {"transfer": {"volume_id": vid, "name": f"d2g {j['id']}"}})["transfer"]
+                try:
+                    tcl.call("POST", "volumev3", f"/os-volume-transfer/{tr['id']}/accept",
+                             {"accept": {"auth_key": tr["auth_key"]}})
+                except Exception:
+                    cl.call("DELETE", "volumev3", f"/os-volume-transfer/{tr['id']}")
+                    d.execute("UPDATE jobs SET state='synced' WHERE id=?", (j["id"],))
+                    raise
+                tcl.wait_vol(vid, "available")
+                event(actor(), f"job {j['id']}: volume {vid} transferred to {t['name']} ({t['project']})")
+                log(f"volume {vid} transferred to project {t['project']} ({t['name']})")
             cl = tcl
         ag = d.execute("SELECT inventory FROM agents WHERE name=?", (j["agent"],)).fetchone()
         inv = json.loads(ag["inventory"] or "{}") if ag else {}
         props = {"os_type": "linux", "hw_vif_model": "virtio", "hw_vif_multiqueue_enabled": "true"}
         props.update({k: str(v) for k, v in (inv.get("props") or {}).items()})
-        cl.vol_action(j["volume_id"], {"os-set_bootable": {"bootable": True}})
-        cl.vol_action(j["volume_id"], {"os-set_image_metadata": {"metadata": props}})
+        # the boot disk is the first one; the others are attached in the order of the source VM
+        cl.vol_action(vids[0], {"os-set_bootable": {"bootable": True}})
+        cl.vol_action(vids[0], {"os-set_image_metadata": {"metadata": props}})
         name = a.name or f"{j['agent']}-d2g"
-        sid = cl.create_server(name, a.flavor, j["az"], a.network or t["network"], j["volume_id"], a.sg or t["vm_sg"],
+        sid = cl.create_server(name, a.flavor, j["az"], a.network or t["network"], vids, a.sg or t["vm_sg"],
                                key=a.key, meta={"d2g_job": j["id"]})
         d.execute("UPDATE jobs SET server_id=?, vm_name=? WHERE id=?", (sid, name, j["id"]))
         s = cl.wait_server(sid)
         ips = [x["addr"] for n in s.get("addresses", {}).values() for x in n]
         d.execute("UPDATE jobs SET state='finished' WHERE id=?", (j["id"],))
-        event(actor(), f"job {j['id']}: VM {name} {sid} created in {t['name']} from volume {j['volume_id']}, {ips}")
-        print(f"VM {name} {sid} ACTIVE {' '.join(ips)} (snapshot {j['synced_snapshot']})")
+        event(actor(), f"job {j['id']}: VM {name} {sid} created in {t['name']} from {len(vids)} volume(s) {' '.join(vids)}, {ips}")
+        print(f"VM {name} {sid} ACTIVE {' '.join(ips)} (snapshot {j['synced_snapshot']}, {len(vids)} disk(s))")
 
 
 def cmd_status(a):

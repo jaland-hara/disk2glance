@@ -113,8 +113,10 @@ class Cloud:
     def create_server(self, name, flavor, az, net, vid, sgs, key=None, user_data=None, delete_vol=False, meta=None):
         s = {"name": name, "flavorRef": self.flavor_id(flavor), "availability_zone": az,
              "networks": [{"uuid": self.network_id(net)}],
-             "block_device_mapping_v2": [{"uuid": vid, "source_type": "volume", "destination_type": "volume",
-                                          "boot_index": 0, "delete_on_termination": delete_vol}],
+             # vid: the boot volume, or a list (boot volume first, the others attached in this order)
+             "block_device_mapping_v2": [{"uuid": v, "source_type": "volume", "destination_type": "volume",
+                                          "boot_index": 0 if n == 0 else -1, "delete_on_termination": delete_vol}
+                                         for n, v in enumerate([vid] if isinstance(vid, str) else vid)],
              "security_groups": [{"name": g} for g in sgs], "metadata": meta or {}}
         if key:
             s["key_name"] = key

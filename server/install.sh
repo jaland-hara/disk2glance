@@ -43,6 +43,32 @@ if [ -d /etc/needrestart ]; then
     >/etc/needrestart/conf.d/d2g.conf
 fi
 
+# Job volumes are copies of source disks, some with LVM. The receiver must never activate their
+# volume groups: udev rescans a disk after it is written to, an active LV would hold the volume
+# (writes refused, detach stuck), and a group named like one on another source would clash. LVM
+# on this VM sees only the disk it boots from.
+lvm_guard() {
+  local f=/etc/lvm/lvmlocal.conf src d
+  command -v lvm >/dev/null || return 0
+  src=$(findmnt -no SOURCE /)
+  d=$(lsblk -nso NAME,TYPE "$src" 2>/dev/null | awk '$2 == "disk" {gsub(/[^a-z0-9]/, "", $1); print $1; exit}')
+  [ -n "$d" ] || { log "WARN: cannot find the root disk: LVM filter not set"; return 0; }
+  mkdir -p /etc/lvm
+  [ -f "$f" ] && sed -i '/^# d2g-begin/,/^# d2g-end/d' "$f"
+  cat >>"$f" <<LVM
+# d2g-begin: job volumes are copies of source disks — LVM sees only this VM's own disk ($d)
+devices {
+	global_filter = [ "a|^/dev/$d[0-9p]*\$|", "r|.*|" ]
+}
+global {
+	event_activation = 0
+}
+# d2g-end
+LVM
+  lvm config --typeconfig current devices/global_filter >/dev/null 2>&1 || log "WARN: lvm does not accept the filter in $f"
+  log "LVM filter: only /dev/$d"
+}
+
 case $ROLE in
 orch)
   if ! dpkg -s nginx-core libnginx-mod-stream >/dev/null 2>&1; then
@@ -77,6 +103,7 @@ orch)
   if [ -f /etc/d2g/rx.json ]; then
     # the local receiver rx0: job volumes are attached to this VM — its own disk must not look like them
     /opt/d2g/unique-boot.sh
+    lvm_guard
     systemctl enable -q d2g-rx && systemctl restart d2g-rx
   fi
   log "orchestrator $VER is running: d2g status"
@@ -84,6 +111,7 @@ orch)
 rx)
   # job volumes are copies of source disks: the receiver's own disk must not look like them at boot
   /opt/d2g/unique-boot.sh
+  lvm_guard
   [ -f /etc/d2g/rx.json ] || d2g rx-join
   install -m 644 d2g-rx.service /etc/systemd/system/d2g-rx.service
   systemctl daemon-reload

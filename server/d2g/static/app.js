@@ -77,7 +77,7 @@ function vOverview() {
 }
 function agentsTable() {
   if (!S.agents.length) return `<div class="panel"><div class="empty">Исходных ВМ ещё нет. Нажмите «Добавить ВМ» и выполните команду на исходной ВМ.</div></div>`;
-  return `<div class="panel"><table><tr><th>ВМ</th><th>Состояние</th><th>Система</th><th class="num">Диск</th><th>Путь до приёмника</th><th>Связь</th><th>Последний отчёт</th><th></th></tr>` +
+  return `<div class="panel"><table><tr><th>ВМ</th><th>Состояние</th><th>Система</th><th class="num">Диски</th><th>Путь до приёмника</th><th>Связь</th><th>Последний отчёт</th><th></th></tr>` +
     S.agents.map((a) => {
       const rep = a.report && a.report.rc !== undefined && a.report.rc !== null
         ? `<span class="badge ${a.report.rc === 0 ? "ok" : "bad"}">${a.report.rc === 0 ? "успешно" : "ошибка " + esc(a.report.rc)}</span> <span class="small muted">${ago(a.report.at)}</span><div class="small">${esc(a.report.summary || "")}</div>` : `<span class="muted">—</span>`;
@@ -85,7 +85,7 @@ function agentsTable() {
       return `<tr><td><b>${esc(a.name)}</b><div class="small muted">${esc(a.hostname || "")}</div></td>
         <td>${badge(AGENT_STATE, a.state)}${cmd}${a.state === "token" && a.token_exp ? `<div class="small muted">токен до ${when(a.token_exp)}</div>` : ""}</td>
         <td><div>${esc(a.os || "—")}</div><div class="small muted">${esc(a.kernel || "")}${a.module === "no" ? ' · <span class="badge warn">нет модуля</span>' : ""}</div></td>
-        <td class="num">${GiB(a.disk_bytes)}</td><td class="small">${esc(PATHS[a.path] || a.path)}<div class="muted">${a.threads} потоков</div></td>
+        <td class="num small nowrap">${diskList(a.disks, a.disk_bytes)}</td><td class="small">${esc(PATHS[a.path] || a.path)}<div class="muted">${a.threads} потоков</div></td>
         <td class="small nowrap">${ago(a.seen)}<div class="muted mono">${esc(a.peer || "")}</div></td><td>${rep}</td>
         <td><div class="actions">${a.state === "enrolled" ? `<button class="btn" data-act="agent-sync" data-name="${esc(a.name)}">Проход</button>` : ""}
           ${a.state !== "revoked" ? `<button class="btn" data-act="agent-add" data-name="${esc(a.name)}">Новый токен</button>` : ""}
@@ -93,6 +93,12 @@ function agentsTable() {
           ${a.state !== "revoked" ? `<button class="btn danger" data-act="agent-revoke" data-name="${esc(a.name)}">Отключить</button>` : ""}</div></td></tr>`;
     }).join("") + `</table></div>`;
 }
+// disks of a source VM: "vda 20 ГиБ" per line (agents before 0.9 report one disk)
+function diskList(disks, bytes) {
+  if (!disks || !disks.length) return GiB(bytes);
+  return disks.map((d) => `${esc(d.dev.replace("/dev/", ""))} ${GiB(d.bytes)}`).join("<br>");
+}
+const nDisks = (n) => `${n} ${n % 10 === 1 && n % 100 !== 11 ? "диск" : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? "диска" : "дисков"}`;
 function vAgents() {
   return `<h2><span class="grow">Исходные ВМ</span><button class="btn primary" data-act="agent-add">Добавить ВМ</button></h2>${agentsTable()}
   <p class="small muted">Агент устанавливается одной командой с этого оркестратора и ожидает его команд. Сертификат агента позволяет только записывать данные в его том через приёмник; учётные данные облака на исходную ВМ не попадают.</p>`;
@@ -101,10 +107,10 @@ function jobsTable(list, compact) {
   if (!list.length) return `<div class="panel"><div class="empty">${compact ? "Активных заданий нет" : "Заданий ещё нет. Сначала подключите исходную ВМ, затем создайте задание."}</div></div>`;
   return `<div class="panel"><table><tr><th>Задание</th><th>ВМ</th><th>Состояние</th><th>Прогресс</th><th>Синхронизировано</th>${compact ? "" : "<th>Куда / приёмник / том</th><th>Расписание</th>"}<th></th></tr>` +
     list.map((j) => { const ag = S.agents.find((a) => a.name === j.agent) || {}; const queued = ag.command === "sync" && j.state !== "receiving" && j.state !== "finished";
-      return `<tr><td class="mono">${esc(j.id)}</td><td><b>${esc(j.agent)}</b><div class="small muted">${GiB(j.disk_bytes)}</div></td>
+      return `<tr><td class="mono">${esc(j.id)}</td><td><b>${esc(j.agent)}</b><div class="small muted">${(j.disks || []).length > 1 ? nDisks(j.disks.length) + " · " : ""}${GiB(j.disk_bytes)}</div></td>
       <td>${badge(JOB_STATE, j.state)}${queued ? '<div class="small"><span class="badge info">проход в очереди</span></div>' : ""}${j.vm_name ? `<div class="small">ВМ ${esc(j.vm_name)}</div>` : ""}</td><td>${jobProgress(j)}</td>
       <td class="small">${j.synced_at ? ago(j.synced_at) + `<div class="muted">снапшот ${esc((j.synced_snapshot || "").replace("T", " ").replace(/\.\d+Z$/, " UTC"))}</div>` : "—"}</td>
-      ${compact ? "" : `<td class="small"><b>${esc(tgtLabel(j.target))}</b><div class="muted">${esc(j.receiver)} · <span class="mono">${esc((j.volume_id || "").slice(0, 8))}</span> · ${esc(j.az)}</div></td>
+      ${compact ? "" : `<td class="small"><b>${esc(tgtLabel(j.target))}</b><div class="muted">${esc(j.receiver)} · ${esc(j.az)}</div>${(j.disks || []).map((d) => `<div class="muted nowrap">${esc(d.dev.replace("/dev/", ""))} → <span class="mono">${esc((d.volume_id || "").slice(0, 8))}</span></div>`).join("")}</td>
       <td class="small">${j.sync_every ? "каждые " + dur(j.sync_every) : "—"}</td>`}
       <td><div class="actions">${["synced", "ready"].includes(j.state) && !queued ? `<button class="btn" data-act="job-sync" data-id="${esc(j.id)}">Дельта</button>` : ""}
         ${!compact && ["synced", "ready", "receiving"].includes(j.state) ? `<button class="btn" data-act="job-every" data-id="${esc(j.id)}">Расписание</button>` : ""}
@@ -275,6 +281,8 @@ async function newJob(target, agent) {
   const free = S.agents.filter((a) => a.state === "enrolled" && !busy.has(a.name)).map((a) => a.name);
   if (!free.length) return toast("Нет подключённых ВМ без задания: сначала добавьте исходную ВМ", true);
   target = target || "home";
+  agent = free.includes(agent) ? agent : free[0];
+  const disks = (S.agents.find((a) => a.name === agent) || {}).disks || [];
   const t = tgt(target), owner = volOwner(target), c = await cloud(owner), to = owner === "home" ? S.orchestrator : t;
   const how = t.mode === "transfer" ? "Диск принимается в проекте оркестратора; при «Создать ВМ» том передаётся в выбранный проект и ВМ создаётся там."
     : t.mode === "receiver" ? "Диск принимается приёмником внутри выбранного проекта; если приёмника нет, оркестратор создаст его (около 2 мин)."
@@ -283,15 +291,20 @@ async function newJob(target, agent) {
     `<div class="field"><label>Исходная ВМ</label>${sel("a", free, agent)}</div>
      <div class="field"><label>Куда переносить</label><select id="tg">${S.targets.map((x) => `<option value="${esc(x.name)}" ${x.name === target ? "selected" : ""}>${esc(x.name === "home" ? "этот проект (оркестратора)" : (x.title || x.name) + " — " + MODE[x.mode][0])}</option>`).join("")}</select>
        <div class="hint">${esc(how)}</div></div>
+     ${disks.length > 1 ? `<div class="field"><label>Диски</label><div class="checks">${disks.map((d) => `<label><input type="checkbox" class="dsk" value="${esc(d.dev)}" checked ${d.boot ? "disabled" : ""}> ${esc(d.dev)} — ${GiB(d.bytes)}${d.boot ? " (загрузочный)" : ""}${d.mounts && d.mounts.length ? ` <span class="muted">${esc(d.mounts.join(" "))}</span>` : ""}</label>`).join("")}</div>
+       <div class="hint">Снапшоты всех дисков снимаются одним набором — в одну точку времени. Каждый диск переносится в свой том. Группа томов LVM переносится только целиком.</div></div>` : ""}
      <div class="field"><label>Тип тома</label>${sel("vt", c.volume_types, to.rx_volume_type)}</div>
      <div class="field"><label>Зона</label>${sel("az", c.zones, to.az)}<div class="hint">том, приёмник и будущая ВМ будут в этой зоне</div></div>
      <div class="field"><label>Дельты по расписанию</label><select id="ev"><option value="0">нет, по кнопке</option><option value="900">каждые 15 мин</option>
        <option value="3600">каждый час</option><option value="14400">каждые 4 ч</option><option value="86400">раз в сутки</option></select></div>
-     <p class="small muted">Том создаётся по размеру диска исходной ВМ и подключается к приёмнику; первый проход запускается автоматически.</p>`,
+     <p class="small muted">На каждый диск исходной ВМ создаётся том того же размера и подключается к приёмнику; первый проход запускается автоматически.</p>`,
     [{ text: "Отмена" }, { text: "Создать", cls: "primary", ok: true }],
-    async (m) => { const r = await api("/api/ui/job/new", { agent: val(m, "a"), target: val(m, "tg"), type: val(m, "vt"), az: val(m, "az"), every: +val(m, "ev") }); close(); startTask(r, "Новое задание"); });
+    async (m) => { const dk = [...m.querySelectorAll(".dsk")].filter((x) => x.checked).map((x) => x.value);
+      const r = await api("/api/ui/job/new", { agent: val(m, "a"), target: val(m, "tg"), type: val(m, "vt"), az: val(m, "az"), every: +val(m, "ev"), disks: dk.length && dk.length < disks.length ? dk.join(",") : "" }); close(); startTask(r, "Новое задание"); });
   // another project: other zones and volume types
   $("#tg").addEventListener("change", (e) => { const a = val($("#modal .modal"), "a"); newJob(e.target.value, a).catch((x) => toast(x.message, true)); });
+  // another VM: its disks
+  $("#a").addEventListener("change", (e) => { const tg = val($("#modal .modal"), "tg"); newJob(tg, e.target.value).catch((x) => toast(x.message, true)); });
 }
 async function finishJob(id) {
   const j = S.jobs.find((x) => x.id === id), t = tgt(j.target), c = await cloud(j.target);
@@ -393,7 +406,7 @@ document.addEventListener("click", (e) => {
   if (a === "job-sync") return run(api(`/api/ui/job/${id}/sync`, {}).then((r) => startTask(r, "Дельта")));
   if (a === "job-every") return every(id);
   if (a === "job-finish") return run(finishJob(id));
-  if (a === "job-delete") return confirmAct(`Удалить задание ${id}`, "Том будет отключён от приёмника и удалён вместе с перенесёнными данными. Исходная ВМ не меняется.", "Удалить", () => api(`/api/ui/job/${id}/delete`, {}));
+  if (a === "job-delete") return confirmAct(`Удалить задание ${id}`, "Тома задания будут отключены от приёмника и удалены вместе с перенесёнными данными. Исходная ВМ не меняется.", "Удалить", () => api(`/api/ui/job/${id}/delete`, {}));
   if (a === "rx-add") return run(addRx());
   if (a === "tg-add") return run(editTarget());
   if (a === "tg-edit") return run(editTarget(name));

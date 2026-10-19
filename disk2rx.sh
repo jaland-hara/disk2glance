@@ -1,17 +1,23 @@
 #!/bin/bash
-# disk2rx (experimental) — send a live Linux disk into a Cinder volume of the target cloud
-# through a d2g receiver. Same snapshot logic as disk2glance/disk2s3: mounted ext3/ext4/xfs on
-# partitions or linear LVM volumes are read from dattobd snapshots.
+# disk2rx (experimental) — send the disks of a live Linux VM into Cinder volumes of the target
+# cloud through a d2g receiver. Same snapshot logic as disk2glance/disk2s3: mounted ext3/ext4/xfs on
+# partitions, on whole disks or on linear LVM volumes (also spanning several disks) are read from
+# dattobd snapshots, all of them taken as one set (one point in time for all disks of the job).
 #
 # Control goes to the d2g orchestrator (enrollment, job, commands, reports), data goes to the
-# receiver that serves the job's volume, both over HTTPS with mutual TLS. The receiver keeps a
-# journal of block MD5s: a restarted run skips what it already has and a later run (a new
-# snapshot) sends only the blocks that changed (delta pass).
+# receiver that serves the job's volumes (one per disk), both over HTTPS with mutual TLS. The
+# receiver keeps a journal of block MD5s: a restarted run skips what it already has and a later
+# run (a new snapshot set) sends only the blocks that changed (delta pass).
 #
 # Usage:
-#   disk2rx --enroll --name NAME --server ctl.X.d2g --connect IP --pin 'sha256//…' --token T [--no-service]
-#   disk2rx [--check] [--threads N] [--tcp-cc bbr|off] [--disk /dev/vda] [--cow-mb N] [--keep-module]   one pass now
+#   disk2rx --enroll --name NAME --server ctl.X.d2g --connect IP --ca CA.pem|--pin 'sha256//…' --token T [--no-service]
+#   disk2rx [--check] [--threads N] [--tcp-cc bbr|off] [--cow-mb N] [--keep-module]   one pass now
+#   disk2rx --inventory               send the list of disks to the orchestrator now
 #   disk2rx --poll                    wait for commands from the orchestrator (disk2rx-agent.service)
+# The disks are the job's (d2g job new): the boot disk first, then the others; each goes into its
+# own volume, one after another, with all threads. A volume group must be moved whole (all its
+# disks in one job). --cow-mb caps the COW file of each filesystem (default: 10% of it, at most
+# half of its free space).
 # The receiver address is picked from the job: its grey IP, its FIP or the orchestrator (SNI),
 # whichever answers first; the orchestrator can pin one per agent (d2g agent add --path).
 # For the pass the agent adds a host route to the receiver address with TCP BBR (--tcp-cc,
@@ -32,19 +38,22 @@ COW_MB=
 CHECK=0
 ENROLL=0
 POLL=0
+INVENTORY=0
 SERVICE=1
 KEEP_MODULE=0
-A_NAME= A_SERVER= A_CONNECT= A_PIN= A_TOKEN= A_PORT=443
+A_NAME= A_SERVER= A_CONNECT= A_PIN= A_CA= A_TOKEN= A_PORT=443
 while [ $# -gt 0 ]; do
   case $1 in
     --enroll) ENROLL=1 ;;
     --poll) POLL=1 ;;
+    --inventory) INVENTORY=1 ;;
     --no-service) SERVICE=0 ;;
     --name) A_NAME=$2; shift ;;
     --server) A_SERVER=$2; shift ;;
     --connect) A_CONNECT=$2; shift ;;
     --port) A_PORT=$2; shift ;;
     --pin) A_PIN=$2; shift ;;
+    --ca) A_CA=$2; shift ;;
     --token) A_TOKEN=$2; shift ;;
     --check) CHECK=1 ;;
     --disk) DISK=$2; shift ;;
@@ -52,7 +61,7 @@ while [ $# -gt 0 ]; do
     --tcp-cc) TCP_CC=$2; shift ;;
     --cow-mb) COW_MB=$2; shift ;;
     --keep-module) KEEP_MODULE=1 ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) echo "unknown option $1" >&2; exit 64 ;;
   esac
   shift
@@ -73,7 +82,8 @@ mkdir -p "$WORK"; chmod 700 "$WORK"
 # TLS goes to NAME (certificate checked against our CA) at ADDR.
 req() {
   local name=$1 addr=$2 method=$3 path=$4 out=$5 code rc; shift 5
-  code=$(curl -sS --connect-timeout 20 --connect-to "$name:$D2G_PORT:$addr:$D2G_PORT" \
+  # --resolve, not --connect-to: curl 7.29 (CentOS 7) has no --connect-to
+  code=$(curl -sS --connect-timeout 20 --resolve "$name:$D2G_PORT:$addr" \
     --cacert "$PKIDIR/ca.crt" --cert "$PKIDIR/agent.crt" --key "$PKIDIR/agent.key" \
     -o "$out" -w '%{http_code}' -X "$method" "$@" "https://$name:$D2G_PORT$path"); rc=$?
   if [ $rc = 0 ]; then printf '%s' "$code"; else printf '000/curl%s' "$rc"; fi
@@ -99,21 +109,78 @@ report() {  # report ID COMMAND RC SUMMARY TAIL
   ctlretry 200 POST /v1/agent/report /dev/null -H 'Content-Type: application/json' --data-binary @"$WORK/report.json" >/dev/null || true
 }
 
+# --- the VM's disks ----------------------------------------------------------------------------
+# "name bytes serial" of the disks that can be moved: not read-only, not removable, not
+# loop/zram/dm/md, not a config drive. The serial (VK: the first 20 characters of the volume ID)
+# finds the disk again if the kernel names the disks in another order after a reboot.
+list_disks() {
+  local s n ser lbl
+  for s in /sys/block/*; do
+    n=${s##*/}
+    case $n in loop*|ram*|zram*|sr*|dm-*|md*|nbd*|fd*|rbd*) continue ;; esac
+    [ "$(cat "$s/ro" 2>/dev/null || echo 1)" = 0 ] || continue
+    [ "$(cat "$s/removable" 2>/dev/null || echo 0)" = 0 ] || continue
+    [ "$(cat "$s/size" 2>/dev/null || echo 0)" -gt 0 ] || continue
+    lbl=$(blkid -s LABEL -o value "/dev/$n" 2>/dev/null || true)
+    case $lbl in config-2|CONFIG-2|cidata|CIDATA) continue ;; esac
+    ser=$(cat "$s/serial" 2>/dev/null || lsblk -dno SERIAL "/dev/$n" 2>/dev/null || true); ser=${ser//[[:space:]]/}
+    echo "$n $(( $(cat "$s/size") * 512 )) ${ser:--}"
+  done
+}
+# whole disks under a block device: a partition, an LV (through its PVs) or a disk itself
+disks_of() {
+  local n s
+  n=$(basename "$(readlink -f "$1")")
+  [ -e "/sys/class/block/$n" ] || return 0
+  if [ -f "/sys/class/block/$n/partition" ]; then basename "$(dirname "$(readlink -f "/sys/class/block/$n")")"; return 0; fi
+  if [ -n "$(ls "/sys/class/block/$n/slaves" 2>/dev/null)" ]; then
+    for s in /sys/class/block/$n/slaves/*; do disks_of "/dev/${s##*/}"; done | sort -u; return 0
+  fi
+  echo "$n"
+}
+# JSON array of the disks: the boot disk (the one with /boot, else /) first, then by name
+inventory_disks() {
+  local boot= m src n sz ser mnts
+  for m in /boot /; do
+    src=$(findmnt -no SOURCE "$m" 2>/dev/null || true)
+    [ -n "$src" ] && { boot=$(disks_of "$src" | head -1); break; }
+  done
+  list_disks | while read -r n sz ser; do
+    mnts=$({ findmnt -rn -o SOURCE,TARGET; awk 'NR > 1 {print $1, "[swap]"}' /proc/swaps; } 2>/dev/null |
+      while read -r s t; do [ -b "$s" ] && disks_of "$s" | grep -qx "$n" && echo "$t"; done | tr '\n' ' ')
+    jq -nc --arg dev "/dev/$n" --argjson b "$sz" --arg ser "$ser" --arg boot "$([ "$n" = "$boot" ] && echo y)" --arg m "$mnts" \
+      '{dev:$dev, bytes:$b, serial:(if $ser == "-" then "" else $ser end), boot:($boot == "y"), mounts:($m | split(" ") | map(select(. != "")))}'
+  done | jq -sc 'sort_by((if .boot then 0 else 1 end), .dev)'
+}
+
 # --- enrollment: one-time token -> client certificate --------------------------------------
 if [ "$ENROLL" = 1 ]; then
   exec 9>"$WORK/lock"; flock -n 9 || die "another disk2rx is running"
-  for v in A_NAME A_SERVER A_CONNECT A_PIN A_TOKEN; do [ -n "${!v}" ] || die "--enroll needs --${v#A_}" ; done
+  for v in A_NAME A_SERVER A_CONNECT A_TOKEN; do [ -n "${!v}" ] || die "--enroll needs --${v#A_}" ; done
+  [ -n "$A_CA$A_PIN" ] || die "--enroll needs --ca or --pin"
   mkdir -p "$PKIDIR"; chmod 700 "$PKIDIR"
-  base=(curl -sS --connect-timeout 30 --connect-to "$A_SERVER:$A_PORT:$A_CONNECT:$A_PORT" --pinnedpubkey "$A_PIN")
-  # the CA is fetched over a connection whose server key is pinned (from the enrollment command)
-  code=$("${base[@]}" -k -o "$WORK/ca.json" -w '%{http_code}' "https://$A_SERVER:$A_PORT/v1/ca") || die "cannot reach $A_SERVER at $A_CONNECT:$A_PORT (or the server key does not match the pin)"
-  [ "$code" = 200 ] || die "CA download: HTTP $code"
-  jq -r .ca "$WORK/ca.json" >"$PKIDIR/ca.crt"
-  [ -f "$PKIDIR/agent.key" ] || openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$PKIDIR/agent.key" 2>/dev/null
+  base=(curl -sS --connect-timeout 30 --resolve "$A_SERVER:$A_PORT:$A_CONNECT")
+  if [ -n "$A_CA" ]; then
+    # the CA checked by the installer (its SHA-256 is in the enrollment command)
+    install -m 644 "$A_CA" "$PKIDIR/ca.crt"
+  else
+    # the CA is fetched over a connection whose server key is pinned (curl 7.39 and newer)
+    code=$("${base[@]}" --pinnedpubkey "$A_PIN" -k -o "$WORK/ca.json" -w '%{http_code}' "https://$A_SERVER:$A_PORT/v1/ca") || die "cannot reach $A_SERVER at $A_CONNECT:$A_PORT (or the server key does not match the pin)"
+    [ "$code" = 200 ] || die "CA download: HTTP $code"
+    jq -r .ca "$WORK/ca.json" >"$PKIDIR/ca.crt"
+  fi
+  # curl built on NSS (CentOS 7, curl 7.29) crashes on an EC client key (nss-pem has no EC): RSA there
+  if curl --version | head -1 | grep -q NSS; then
+    { [ -f "$PKIDIR/agent.key" ] && ! openssl ec -in "$PKIDIR/agent.key" -noout 2>/dev/null; } ||
+      openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$PKIDIR/agent.key" 2>/dev/null
+  else
+    [ -f "$PKIDIR/agent.key" ] || openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$PKIDIR/agent.key" 2>/dev/null
+  fi
   chmod 600 "$PKIDIR/agent.key"
   openssl req -new -key "$PKIDIR/agent.key" -subj "/CN=$A_NAME" -out "$WORK/agent.csr"
-  dev=$(basename "$(readlink -f "$DISK")")
-  [ -f "/sys/class/block/$dev/size" ] || die "$DISK is not a block device"
+  DISKS_JSON=$(inventory_disks)
+  [ "$(jq length <<<"$DISKS_JSON")" -gt 0 ] || die "no disks found"
+  DISK=$(jq -r '.[0].dev' <<<"$DISKS_JSON"); dev=$(basename "$DISK")
   . /etc/os-release
   qga=no; systemctl list-unit-files 2>/dev/null | grep -q '^qemu-guest-agent' && qga=yes
   props='{}'
@@ -124,8 +191,9 @@ if [ "$ENROLL" = 1 ]; then
   jq -n --arg name "$A_NAME" --arg token "$A_TOKEN" --rawfile csr "$WORK/agent.csr" \
     --arg os "${PRETTY_NAME:-unknown}" --arg kernel "$(uname -r)" --arg host "$(hostname -s)" --arg mod "$mod" \
     --argjson disk "$(( $(cat /sys/class/block/$dev/size) * 512 ))" --argjson props "$props" --arg ver "$VERSION" --arg diskdev "$DISK" \
+    --argjson disks "$DISKS_JSON" \
     '{name:$name, token:$token, csr:$csr, inventory:{os:$os, kernel:$kernel, hostname:$host, disk:$diskdev,
-      disk_bytes:$disk, module:$mod, props:$props, agent_version:$ver}}' >"$WORK/enroll.json"
+      disk_bytes:$disk, disks:$disks, module:$mod, props:$props, agent_version:$ver}}' >"$WORK/enroll.json"
   code=$("${base[@]}" --cacert "$PKIDIR/ca.crt" -o "$WORK/enroll.resp" -w '%{http_code}' -H 'Content-Type: application/json' \
     --data-binary @"$WORK/enroll.json" "https://$A_SERVER:$A_PORT/v1/enroll") || die "enroll request failed"
   rm -f "$WORK/enroll.json"
@@ -173,11 +241,26 @@ if [ -n "${D2G_HOST_ID:-}" ] && [ -n "$(host_id)" ] && [ "$(host_id)" != "$D2G_H
 fi
 export D2G_SERVER D2G_CONNECT D2G_PORT PKIDIR
 
+# the orchestrator builds jobs from the list of disks: it is sent again when the poller starts and
+# every hour (disks added or removed after the enrollment), or by hand: disk2rx --inventory
+send_inventory() {
+  local mod=no code
+  { [ -e /proc/datto-info ] || [ -f "$PREFIX/modules/$(uname -r)/dattobd.ko" ] || modinfo dattobd >/dev/null 2>&1; } && mod=yes
+  jq -n --argjson disks "$(inventory_disks)" --arg kernel "$(uname -r)" --arg mod "$mod" --arg ver "$VERSION" \
+    '{disks:$disks, kernel:$kernel, module:$mod, agent_version:$ver}' >"$WORK/inventory.json"
+  code=$(ctlreq POST /v1/agent/inventory "$WORK/inventory.resp" -m 30 -H 'Content-Type: application/json' --data-binary @"$WORK/inventory.json")
+  [ "$code" = 200 ] || { log "inventory: HTTP $code $(head -c 200 "$WORK/inventory.resp" 2>/dev/null)"; return 1; }
+  log "inventory sent: $(jq -r '[.disks[] | "\(.dev) \(.bytes / 1073741824 | floor) GiB"] | join(", ")' "$WORK/inventory.json")"
+}
+if [ "$INVENTORY" = 1 ]; then send_inventory; exit; fi
+
 # --- poll: commands from the orchestrator ------------------------------------------------------
 if [ "$POLL" = 1 ]; then
   exec 8>"$WORK/poll.lock"; flock -n 8 || die "another poller is running"
   log "disk2rx $VERSION: waiting for commands from $D2G_SERVER ($D2G_CONNECT)"
+  INV_AT=0
   while true; do
+    if [ $(( $(date +%s) - INV_AT )) -ge 3600 ]; then send_inventory && INV_AT=$(date +%s) || INV_AT=$(( $(date +%s) - 3300 )); fi
     code=$(ctlreq GET /v1/agent/command "$WORK/cmd.json" -m 30)
     cmd=; [ "$code" = 200 ] && cmd=$(jq -r '.command // empty' "$WORK/cmd.json" 2>/dev/null)
     if [ -n "$cmd" ]; then
@@ -187,7 +270,7 @@ if [ "$POLL" = 1 ]; then
           log "command $cid: pass ($thr threads), log $LOG"
           echo "===== $(date -u +%FT%TZ) pass by command $cid" >>"$LOG"
           set +e; D2G_POLLED=1 "$0" --threads "$thr" >>"$LOG" 2>&1 8>&-; rc=$?; set -e
-          summary=$(grep -E 'pass [0-9]+ done|ERROR' "$LOG" | tail -1 | cut -c10-)
+          summary=$(grep -E 'pass [0-9]+ done|ERROR' "$LOG" | tail -1 | cut -c10- || true)
           report "$cid" sync "$rc" "$summary" "$(tail -n 15 "$LOG")"
           log "command $cid: rc=$rc $summary" ;;
         uninstall)
@@ -216,62 +299,101 @@ while read -r kind addr; do
 done < <(jq -r '.receiver.addrs[] | "\(.[0]) \(.[1])"' "$WORK/job.json")
 [ -n "$RX_ADDR" ] || die "receiver $RX_NAME is not reachable on any of its addresses"
 export RX_NAME RX_ADDR
-log "disk2rx $VERSION, kernel $(uname -r), disk $DISK: job $JOB pass $PASS -> $RX_NAME via $RX_PATH $RX_ADDR, part $((PART_BYTES / 1048576)) MiB, $THREADS threads"
+log "disk2rx $VERSION, kernel $(uname -r): job $JOB pass $PASS -> $RX_NAME via $RX_PATH $RX_ADDR, part $((PART_BYTES / 1048576)) MiB, $THREADS threads"
 
-# --- layout from sysfs (same as disk2glance) -----------------------------------------
-dev=$(basename "$(readlink -f "$DISK")")
-[ -d "/sys/class/block/$dev" ] || die "$DISK is not a block device"
-DISK_BYTES=$(( $(cat /sys/class/block/$dev/size) * 512 ))
-PARTS=()
-while read -r start size node; do PARTS+=("$start $size $node"); done < <(
-  for p in /sys/class/block/$dev/${dev}*; do
-    [ -f "$p/partition" ] || continue
-    echo "$(( $(cat "$p/start") * 512 )) $(( $(cat "$p/size") * 512 )) /dev/$(basename "$p")"
-  done | sort -n)
-[ ${#PARTS[@]} -gt 0 ] || die "no partitions on $DISK"
-TARGETS=(); MAPS=()
-declare -A PART_START
-for p in "${PARTS[@]}"; do read -r start size node <<<"$p"; PART_START[$(cat /sys/class/block/$(basename "$node")/dev)]=$start; done
+# --- the job's disks: boot disk first; each one goes into its own volume -----------------------
+D_ID=(); D_DEV=(); D_BYTES=()
+if jq -e '(.disks // []) | length > 0' "$WORK/job.json" >/dev/null; then
+  LOCAL_DISKS=$(list_disks)
+  while read -r id ser jdev bytes; do
+    n=
+    [ "$ser" != - ] && n=$(awk -v s="$ser" '$3 == s {print $1; exit}' <<<"$LOCAL_DISKS")
+    [ -n "$n" ] || n=$(basename "$jdev")
+    [ -d "/sys/block/$n" ] || die "disk $jdev (serial $ser) of the job is not on this VM"
+    D_ID+=("$id"); D_DEV+=("/dev/$n"); D_BYTES+=("$bytes")
+  done < <(jq -r '.disks[] | "\(.id) \(if (.serial // "") == "" then "-" else .serial end) \(.dev) \(.disk_bytes)"' "$WORK/job.json")
+  while read -r n sz ser; do
+    printf '%s\n' "${D_DEV[@]}" | grep -qx "/dev/$n" ||
+      log "WARN: disk /dev/$n ($(( sz / 1073741824 )) GiB) is not in the job: it is not moved (it appeared after the job was created?)"
+  done <<<"$LOCAL_DISKS"
+else   # orchestrator older than 0.9: one disk
+  D_ID=("$JOB"); D_DEV=("$DISK"); D_BYTES=("$JOB_BYTES")
+fi
+ND=${#D_ID[@]}
+
+# --- layout from sysfs ---------------------------------------------------------------------------
+# A slice is a partition, or the whole disk when it has no partition table (a filesystem or a PV
+# right on the disk). MAPS: "fs_dev fs_off len disk_index disk_off" — where each piece of a
+# snapshotted filesystem lies on the disks (an LV spanning disks has a piece on each).
+SLICES=(); TARGETS=(); MAPS=()
+declare -A SLICE_AT SEEN_DM
+for i in "${!D_DEV[@]}"; do
+  dev=$(basename "$(readlink -f "${D_DEV[i]}")")
+  [ -d "/sys/class/block/$dev" ] || die "${D_DEV[i]} is not a block device"
+  b=$(( $(cat /sys/class/block/$dev/size) * 512 ))
+  [ "$b" = "${D_BYTES[i]}" ] || die "disk ${D_DEV[i]} is $b bytes, the job expects ${D_BYTES[i]} (disk resized since the job was created?)"
+  n=0
+  while read -r start size node; do SLICES+=("$i $start $size $node"); n=$((n + 1)); done < <(
+    for p in /sys/class/block/$dev/${dev}*; do
+      [ -f "$p/partition" ] || continue
+      echo "$(( $(cat "$p/start") * 512 )) $(( $(cat "$p/size") * 512 )) /dev/$(basename "$p")"
+    done | sort -n)
+  [ "$n" -gt 0 ] || SLICES+=("$i 0 $b /dev/$dev")
+done
+for s in "${SLICES[@]}"; do read -r i start size node <<<"$s"; SLICE_AT[$(cat /sys/class/block/$(basename "$node")/dev)]="$i $start"; done
 fs_of() { findmnt -rn -S "$1" -o TARGET,FSTYPE | head -1; }
 plan_fs() { case "${2:-}" in ext4|ext3|xfs) return 0 ;; btrfs) die "$4 is btrfs — not supported" ;; *) return 1 ;; esac; }
-declare -A SEEN_DM
-for p in "${PARTS[@]}"; do
-  read -r start size node <<<"$p"
+for s in "${SLICES[@]}"; do
+  read -r i start size node <<<"$s"
   pname=$(basename "$node")
-  holders=$(ls /sys/class/block/$pname/holders 2>/dev/null | tr '\n' ' ')
+  holders=$(ls /sys/class/block/$pname/holders 2>/dev/null | tr '\n' ' ' || true)
   if [ -z "${holders// }" ]; then
     mnt=; fstype=
     read -r mnt fstype < <(fs_of "$node") || true
-    if plan_fs "$node" "${fstype:-}" "${mnt:-}" "$node"; then TARGETS+=("$node $mnt"); MAPS+=("$node 0 $size $start"); how=snap; else how=raw; fi
-    log "  $node start=$start size=$size fs=${fstype:-none} mnt=${mnt:--} -> $how"
+    if plan_fs "$node" "${fstype:-}" "${mnt:-}" "$node"; then TARGETS+=("$node $mnt"); MAPS+=("$node 0 $size $i $start"); how=snap; else how=raw; fi
+    log "  disk $i ${D_DEV[i]}: $node start=$start size=$size fs=${fstype:-none} mnt=${mnt:--} -> $how"
     continue
   fi
+  log "  disk $i ${D_DEV[i]}: $node start=$start size=$size -> $holders"
   for h in $holders; do
     [ -n "${SEEN_DM[$h]:-}" ] && continue; SEEN_DM[$h]=1
     uuid=$(cat /sys/class/block/$h/dm/uuid 2>/dev/null || true); name=$(cat /sys/class/block/$h/dm/name 2>/dev/null || echo "$h")
     case $uuid in LVM-*) ;; *) die "$node is used by $h ($name) — only linear LVM is supported" ;; esac
     lvdev=/dev/mapper/$name; mnt=; fstype=
     read -r mnt fstype < <(fs_of "$lvdev") || true
-    if plan_fs "$lvdev" "${fstype:-}" "${mnt:-}" "LV $name"; then
-      while read -r s l target dmaj off rest; do
-        [ "$target" = linear ] || die "LV $name has a '$target' segment"
-        ps=${PART_START[$dmaj]:-}; [ -n "$ps" ] || die "LV $name spans disks"
-        MAPS+=("$lvdev $((s*512)) $((l*512)) $((ps + off*512))")
-      done < <(dmsetup table "$name")
-      TARGETS+=("$lvdev $mnt"); how=snap
-    else how=raw; fi
+    # every piece of the LV must lie on a disk of the job, also when the LV is not snapshotted
+    while read -r st l target dmaj off rest; do
+      [ "$target" = linear ] || die "LV $name has a '$target' segment — only linear LVM is supported"
+      at=${SLICE_AT[$dmaj]:-}
+      [ -n "$at" ] || die "LV $name lies partly on $dmaj ($(basename "$(readlink -f /sys/dev/block/$dmaj)")), a disk that is not in the job: a volume group is moved with all its disks in one job"
+      read -r di ps <<<"$at"
+      plan_fs "$lvdev" "${fstype:-}" "${mnt:-}" "LV $name" && MAPS+=("$lvdev $((st * 512)) $((l * 512)) $di $((ps + off * 512))")
+    done < <(dmsetup table "$name")
+    if plan_fs "$lvdev" "${fstype:-}" "${mnt:-}" "LV $name"; then TARGETS+=("$lvdev $mnt"); how=snap; else how=raw; fi
     log "    LV $name fs=${fstype:-none} mnt=${mnt:--} -> $how"
   done
 done
 
-
-NPARTS=$(( (DISK_BYTES + PART_BYTES - 1) / PART_BYTES ))
-[ "$DISK_BYTES" = "$JOB_BYTES" ] || die "disk is $DISK_BYTES bytes, the job expects $JOB_BYTES (disk resized since enrollment?)"
+TOTAL_BYTES=0; TOTAL_PARTS=0
+for i in "${!D_DEV[@]}"; do TOTAL_BYTES=$((TOTAL_BYTES + D_BYTES[i])); TOTAL_PARTS=$((TOTAL_PARTS + (D_BYTES[i] + PART_BYTES - 1) / PART_BYTES)); done
 SHM_NEED=$((PART_BYTES * THREADS / 1048576))
 SHM_FREE=$(df -m --output=avail /dev/shm | tail -1 | tr -d ' ')
 [ "$SHM_FREE" -gt "$SHM_NEED" ] || die "/dev/shm has $SHM_FREE MiB free, need $SHM_NEED (part size x threads): use fewer --threads"
+# COW file of each filesystem: --cow-mb or 10% of it (dattobd's default), at most half of its free space
+declare -A COWSZ
+for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
+  read -r tdev tmnt <<<"$t"; f="${tmnt%/}/$COW"
+  read -r fsz favail < <(df -Pk "$tmnt" | awk 'NR == 2 {printf "%d %d\n", $2 / 1024, $4 / 1024}')
+  [ -e "$f" ] && favail=$(( favail + $(du -m "$f" | cut -f1) ))   # a COW file left by an interrupted pass: removed below
+  want=${COW_MB:-$(( fsz / 10 ))}; cap=$(( favail / 2 ))
+  [ "$want" -gt "$cap" ] && { log "$tmnt: $favail MiB free — COW file $cap MiB instead of $want"; want=$cap; }
+  [ "$want" -ge 16 ] || die "$tmnt has $favail MiB free: not enough for the COW file of its snapshot (at least 32 MiB free needed)"
+  COWSZ[$tdev]=$want
+done
 if [ "$CHECK" = 1 ]; then
-  log "CHECK OK: $DISK_BYTES bytes, $NPARTS parts of $((PART_BYTES / 1048576)) MiB -> job $JOB"
+  for i in "${!D_DEV[@]}"; do log "CHECK: disk $i ${D_DEV[i]} ${D_BYTES[i]} bytes -> ${D_ID[i]}"; done
+  for t in ${TARGETS[@]+"${TARGETS[@]}"}; do read -r tdev tmnt <<<"$t"; log "CHECK: snapshot $tdev ($tmnt), COW file ${COWSZ[$tdev]} MiB"; done
+  log "CHECK OK: $ND disk(s), $TOTAL_BYTES bytes, $TOTAL_PARTS parts of $((PART_BYTES / 1048576)) MiB -> job $JOB"
   exit 0
 fi
 
@@ -403,7 +525,6 @@ for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
 done
 fb_install
 t0=$(date +%s); sync; log "sync before snapshots: $(( $(date +%s) - t0 )) s"
-COWOPT=(); [ -n "$COW_MB" ] && COWOPT=(-f "$COW_MB")
 # Snapshot set: with the disk2glance build of dattobd (hold_thaw, patches/dattobd-hold-thaw.patch)
 # each filesystem stays frozen after its snapshot until all are taken, so the snapshots are one
 # point in time; writes wait for the whole set (0.2-0.3 s for five filesystems). The root
@@ -420,9 +541,9 @@ fi
 T_SNAP=$(date -u +%FT%T.%3NZ); ts0=$(date +%s%N)
 for t in ${snap_order[@]+"${snap_order[@]}"}; do
   read -r tdev tmnt <<<"$t"; m=$(next_minor); t0=$(date +%s%N)
-  dbdctl setup-snapshot ${COWOPT[@]+"${COWOPT[@]}"} "$tdev" "${tmnt%/}/$COW" "$m" || { hold_release; die "setup-snapshot $tdev failed"; }
+  dbdctl setup-snapshot -f "${COWSZ[$tdev]}" "$tdev" "${tmnt%/}/$COW" "$m" || { hold_release; die "setup-snapshot $tdev failed"; }
   MINORS+=("$m"); SNAPDEV[$tdev]=/dev/datto$m
-  snap_log+=("snapshot $tdev ($tmnt) -> /dev/datto$m in $(( ($(date +%s%N) - t0) / 1000000 )) ms")
+  snap_log+=("snapshot $tdev ($tmnt) -> /dev/datto$m in $(( ($(date +%s%N) - t0) / 1000000 )) ms, COW file ${COWSZ[$tdev]} MiB")
 done
 held=$(cat "$HOLD/release_held" 2>/dev/null || echo 0); hold_release
 for l in ${snap_log[@]+"${snap_log[@]}"}; do log "$l"; done
@@ -435,20 +556,10 @@ elif [ ${#snap_order[@]} -gt 1 ]; then
 fi
 fb_remove   # the copy has the unit, the source no longer does
 
-# --- segment map of the whole disk: "disk_off len src src_off", contiguous ------------
-SEG=$WORK/segments
-{
-  pos=0
-  while read -r doff len src soff; do
-    [ "$doff" -ge "$pos" ] || die "overlapping ranges at $doff"
-    [ "$doff" -gt "$pos" ] && echo "$pos $((doff - pos)) $DISK $pos"
-    echo "$doff $len $src $soff"; pos=$((doff + len))
-  done < <(for m in ${MAPS[@]+"${MAPS[@]}"}; do read -r tdev toff tlen doff <<<"$m"; echo "$doff $tlen ${SNAPDEV[$tdev]} $toff"; done | sort -n)
-  [ "$pos" -lt "$DISK_BYTES" ] && echo "$pos $((DISK_BYTES - pos)) $DISK $pos"
-} >"$SEG.raw"
+# --- segment map of each disk: "disk_off len src src_off", contiguous ------------------------
 # The COW files are part of the copy (deleted there at first boot), but their content is of no use:
 # their extents go as zeros, so they cost nothing on the wire and do not show up in every delta.
-# filefrag gives physical extents in filesystem blocks; MAPS maps the filesystem onto the disk.
+# filefrag gives physical extents in filesystem blocks; MAPS maps the filesystem onto the disks.
 for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
   read -r tdev tmnt <<<"$t"
   f="${tmnt%/}/$COW"; [ -f "$f" ] || continue
@@ -457,36 +568,50 @@ for t in ${TARGETS[@]+"${TARGETS[@]}"}; do
   while read -r pa pb; do
     fo=$((pa * bs)); fl=$(( (pb - pa + 1) * bs ))
     for m in ${MAPS[@]+"${MAPS[@]}"}; do
-      read -r mdev moff mlen mdoff <<<"$m"; [ "$mdev" = "$tdev" ] || continue
+      read -r mdev moff mlen mi mdoff <<<"$m"; [ "$mdev" = "$tdev" ] || continue
       a=$(( fo > moff ? fo : moff )); b=$(( fo + fl < moff + mlen ? fo + fl : moff + mlen ))
-      [ "$a" -lt "$b" ] && echo "$((mdoff + a - moff)) $((b - a))"
+      [ "$a" -lt "$b" ] && echo "$mi $((mdoff + a - moff)) $((b - a))"
     done
   done
-done | sort -n >"$WORK/zero_ranges"
-# cut the zero ranges out of the segments: "disk_off len zero 0"
-awk 'NR == FNR { zs[++nz] = $1; ze[nz] = $1 + $2; next }
-     { o = $1; e = $1 + $2
-       for (i = 1; i <= nz && o < e; i++) {
-         if (ze[i] <= o || zs[i] >= e) continue
-         if (zs[i] > o) { printf "%.0f %.0f %s %.0f\n", o, zs[i] - o, $3, $4 + o - $1; o = zs[i] }
-         z = (ze[i] < e ? ze[i] : e); printf "%.0f %.0f zero 0\n", o, z - o; o = z
-       }
-       if (o < e) printf "%.0f %.0f %s %.0f\n", o, e - o, $3, $4 + o - $1 }' "$WORK/zero_ranges" "$SEG.raw" >"$SEG"
-log "segments: $(wc -l <"$SEG"), COW files sent as zeros: $(awk '{s += $2} END {printf "%.0f", s / 1048576}' "$WORK/zero_ranges") MiB"
+done >"$WORK/zero_ranges.all"
+for i in "${!D_DEV[@]}"; do
+  {
+    pos=0
+    while read -r doff len src soff; do
+      [ "$doff" -ge "$pos" ] || die "disk $i: overlapping ranges at $doff"
+      [ "$doff" -gt "$pos" ] && echo "$pos $((doff - pos)) ${D_DEV[i]} $pos"
+      echo "$doff $len $src $soff"; pos=$((doff + len))
+    done < <(for m in ${MAPS[@]+"${MAPS[@]}"}; do
+               read -r tdev toff tlen mi doff <<<"$m"; [ "$mi" = "$i" ] && echo "$doff $tlen ${SNAPDEV[$tdev]} $toff"
+             done | sort -n)
+    [ "$pos" -lt "${D_BYTES[i]}" ] && echo "$pos $((D_BYTES[i] - pos)) ${D_DEV[i]} $pos"
+  } >"$WORK/segments.$i.raw"
+  awk -v d="$i" '$1 == d {print $2, $3}' "$WORK/zero_ranges.all" | sort -n >"$WORK/zero_ranges.$i"
+  # cut the zero ranges out of the segments: "disk_off len zero 0"
+  # (FILENAME, not NR == FNR: the zero list is empty on a disk without COW files)
+  awk 'FILENAME == ARGV[1] { zs[++nz] = $1; ze[nz] = $1 + $2; next }
+       { o = $1; e = $1 + $2
+         for (k = 1; k <= nz && o < e; k++) {
+           if (ze[k] <= o || zs[k] >= e) continue
+           if (zs[k] > o) { printf "%.0f %.0f %s %.0f\n", o, zs[k] - o, $3, $4 + o - $1; o = zs[k] }
+           z = (ze[k] < e ? ze[k] : e); printf "%.0f %.0f zero 0\n", o, z - o; o = z
+         }
+         if (o < e) printf "%.0f %.0f %s %.0f\n", o, e - o, $3, $4 + o - $1 }' "$WORK/zero_ranges.$i" "$WORK/segments.$i.raw" >"$WORK/segments.$i"
+  log "disk $i ${D_DEV[i]}: segments $(wc -l <"$WORK/segments.$i"), COW files sent as zeros: $(awk '{s += $2} END {printf "%.0f", s / 1048576}' "$WORK/zero_ranges.$i") MiB"
+done
 
 # --- transfer ----------------------------------------------------------------------------------
-code=$(rxretry 200 POST "/v1/jobs/$JOB/start" "$WORK/start.resp" -H 'Content-Type: application/json' \
-  --data-binary "{\"snapshot_time\":\"$T_SNAP\"}")
-[ "$code" = 200 ] || die "start: HTTP $code $(head -c 300 "$WORK/start.resp" 2>/dev/null)"
-code=$(rxretry 200 GET "/v1/jobs/$JOB/parts" "$WORK/journal.json")
-[ "$code" = 200 ] || die "journal: HTTP $code"
-rm -rf "$WORK/parts" "$WORK/buf"; mkdir -p "$WORK/parts"
-jq -r '.parts | to_entries[] | "\(.key) \(.value)"' "$WORK/journal.json" | while read -r k h; do echo "$h" >"$WORK/parts/$k.have"; done
-HAVE=$(ls "$WORK/parts" | grep -c '\.have$' || true)
-log "receiver already has $HAVE/$NPARTS parts"
+# All volumes of the job are marked "receiving" before the first byte: until every disk has
+# confirmed this snapshot set, the orchestrator does not show the job as synced (a pass broken
+# after the first disk leaves the volumes from different points in time).
+for i in "${!D_DEV[@]}"; do
+  code=$(rxretry 200 POST "/v1/jobs/${D_ID[i]}/start" "$WORK/start.resp" -H 'Content-Type: application/json' \
+    --data-binary "{\"snapshot_time\":\"$T_SNAP\"}")
+  [ "$code" = 200 ] || die "start ${D_ID[i]}: HTTP $code $(head -c 300 "$WORK/start.resp" 2>/dev/null)"
+done
 BUF=/dev/shm/disk2rx; rm -rf "$BUF"; mkdir -p "$BUF"; chmod 700 "$BUF"; ln -sfn "$BUF" "$WORK/buf"
 ZMD5_BLOCK=$(head -c "$BLOCK_BYTES" /dev/zero | md5sum | cut -d' ' -f1)
-export WORK BUF SEG JOB PART_BYTES BLOCK_BYTES DISK_BYTES NPARTS ZMD5_BLOCK
+export WORK BUF PART_BYTES BLOCK_BYTES ZMD5_BLOCK
 
 # read [off, off+len) of the composed disk to stdout
 emit_range() {
@@ -499,18 +624,19 @@ emit_range() {
     else dd if="$src" bs=4M iflag=skip_bytes,count_bytes,fullblock skip=$((soff + a - doff)) count=$((b - a)) status=none; fi
   done <"$SEG"
 }
-# do_part K: read the part and hash its blocks (a part = 16 blocks). Blocks the receiver already
-# has with the same MD5 are skipped; zero blocks go as a marker without data; the rest go in one
-# request: body = the changed blocks one after another, X-D2G-Blocks = "index:md5,..." in body order.
+# do_part K: read part K of the current disk and hash its blocks (a part = 16 blocks). Blocks the
+# receiver already has with the same MD5 are skipped; zero blocks go as a marker without data; the
+# rest go in one request: body = the changed blocks one after another, X-D2G-Blocks = "index:md5,...".
+# State of the parts of the current disk: $PD/K.have (receiver journal), K.ok (done), K.sent.
 do_part() {
-  local k=$1 off len buf cur have i h n code try body nb blen zmd5
+  local k=$1 off len buf cur have i h n code try body nb blen zmd5 pd=${PD:?}
   off=$(( (k - 1) * PART_BYTES )); len=$(( DISK_BYTES - off < PART_BYTES ? DISK_BYTES - off : PART_BYTES ))
-  buf=$BUF/p$k
+  buf=${BUF:?}/p$k
   emit_range "$off" "$len" >"$buf" || { echo "part $k: read failed" >&2; return 1; }
   [ "$(stat -c %s "$buf")" = "$len" ] || { echo "part $k: short read" >&2; return 1; }
   mapfile -t cur < <(split -b "$BLOCK_BYTES" --filter='md5sum' "$buf" | cut -c1-32)
-  have=(); [ -f "$WORK/parts/$k.have" ] && IFS=, read -r -a have <"$WORK/parts/$k.have"
-  local data=() zero=() hdr=
+  have=(); [ -f "$pd/$k.have" ] && IFS=, read -r -a have <"$pd/$k.have"
+  local data=() zero=()
   n=${#cur[@]}
   for ((i = 0; i < n; i++)); do
     [ ${#have[@]} = "$n" ] && [ "${have[i]}" = "${cur[i]}" ] && continue
@@ -519,7 +645,7 @@ do_part() {
     if [ "${cur[i]}" = "$zmd5" ]; then zero+=("$i"); else data+=("$i:${cur[i]}"); fi
   done
   if [ ${#data[@]} = 0 ] && [ ${#zero[@]} = 0 ]; then
-    (IFS=,; echo "${cur[*]}") >"$WORK/parts/$k.ok"; rm -f "$buf"; return 0
+    (IFS=,; echo "${cur[*]}") >"$pd/$k.ok"; rm -f "$buf"; return 0
   fi
   body=$buf
   if [ ${#data[@]} -lt "$n" ] && [ ${#data[@]} -gt 0 ]; then
@@ -532,51 +658,71 @@ do_part() {
   [ ${#zero[@]} -gt 0 ] && args+=(-H "X-D2G-Zero-Blocks: $(IFS=,; echo "${zero[*]}")")
   [ ${#data[@]} = 0 ] && args+=(-H "Content-Length: 0" --data-binary "")
   for try in $(seq 1 12); do
-    code=$(rxreq PUT "/v1/jobs/$JOB/parts/$k" "$WORK/parts/$k.resp" "${args[@]}")
+    code=$(rxreq PUT "/v1/jobs/$JOB/parts/$k" "$pd/$k.resp" "${args[@]}")
     if [ "$code" = 200 ]; then
-      (IFS=,; echo "${cur[*]}") >"$WORK/parts/$k.ok"; echo "$nb ${#data[@]} ${#zero[@]}" >"$WORK/parts/$k.sent"
-      rm -f "$buf" "$buf.d" "$WORK/parts/$k.resp"; return 0
+      (IFS=,; echo "${cur[*]}") >"$pd/$k.ok"; echo "$nb ${#data[@]} ${#zero[@]}" >"$pd/$k.sent"
+      rm -f "$buf" "$buf.d" "$pd/$k.resp"; return 0
     fi
-    if [ "$code" = 503 ]; then echo x >>"$WORK/parts/busy"; sleep 1; continue; fi   # receiver busy: not an error
-    echo "$(date -u +%T) part $k try $try: HTTP $code $(head -c 200 "$WORK/parts/$k.resp" 2>/dev/null)" >&2
-    echo "$try" >>"$WORK/parts/retries"
-    case $code in 401|403|404) break ;; 409) rm -f "$WORK/parts/$k.have"; break ;; esac
+    if [ "$code" = 503 ]; then echo x >>"$pd/busy"; sleep 1; continue; fi   # receiver busy: not an error
+    echo "$(date -u +%T) part $k try $try: HTTP $code $(head -c 200 "$pd/$k.resp" 2>/dev/null)" >&2
+    echo "$try" >>"$pd/retries"
+    case $code in 401|403|404) break ;; 409) rm -f "$pd/$k.have"; break ;; esac
     sleep $(( try * 5 < 60 ? try * 5 : 60 ))
   done
   rm -f "$buf" "$buf.d"; return 1
 }
 export -f emit_range do_part req rxreq
 
+# send_disk I: disk I into its volume (job disk D_ID[I]), all threads
+T_SENTB=0; T_SENT=0; T_DBLK=0; T_ZBLK=0; T_RETRIES=0
+send_disk() {
+  local i=$1 round missing k code ok=0 t0 t1 dt sentb dblk zblk sent retries
+  JOB=${D_ID[i]}; DISK_BYTES=${D_BYTES[i]}; SEG=$WORK/segments.$i; PD=$WORK/parts.$i
+  NPARTS=$(( (DISK_BYTES + PART_BYTES - 1) / PART_BYTES ))
+  export JOB DISK_BYTES SEG PD NPARTS
+  code=$(rxretry 200 GET "/v1/jobs/$JOB/parts" "$WORK/journal.json")
+  [ "$code" = 200 ] || die "journal of $JOB: HTTP $code"
+  rm -rf "${PD:?}"; mkdir -p "$PD"
+  jq -r '.parts | to_entries[] | "\(.key) \(.value)"' "$WORK/journal.json" | while read -r k h; do echo "$h" >"$PD/$k.have"; done
+  log "disk $i ${D_DEV[i]} -> $JOB: receiver already has $(ls "$PD" | grep -c '\.have$' || true)/$NPARTS parts"
+  t0=$(date +%s)
+  ( exec 9>&-; while sleep 30; do   # fd 9 = lock: a leftover sleep must not hold it
+      n=$(ls "$PD" | grep -c '\.ok$' || true); dt=$(( $(date +%s) - t0 ))
+      b=$(cat "$PD"/*.sent 2>/dev/null | awk '{s += $1} END {printf "%.0f", s / 1048576}' || true)
+      log "progress: disk $i: $n/$NPARTS parts checked, $b MiB sent, $(( b / (dt > 0 ? dt : 1) )) MiB/s, retries $(cat "$PD/retries" 2>/dev/null | wc -l)"
+    done ) & PPID_MON=$!
+  for round in 1 2 3; do
+    seq 1 "$NPARTS" | while read -r k; do [ -f "$PD/$k.ok" ] || echo "$k"; done >"$WORK/todo"
+    [ -s "$WORK/todo" ] || break
+    xargs -P "$THREADS" -n 1 bash -c 'do_part "$1"' _ <"$WORK/todo" & XPID=$!
+    wait "$XPID" || log "disk $i round $round: some parts failed, $(seq 1 "$NPARTS" | while read -r k; do [ -f "$PD/$k.ok" ] || echo x; done | wc -l) left"
+    XPID=
+    # the receiver confirms the whole disk; parts it lacks (or has with another MD5) are sent again
+    # per part: MD5 of its block list "md5,md5,..." (the receiver computes the same from its journal)
+    { printf '{"snapshot_time":"%s","sent":%s,"part_md5":[' "$T_SNAP" "$(ls "$PD" | grep -c '\.sent$' || true)"
+      for k in $(seq 1 "$NPARTS"); do [ "$k" -gt 1 ] && printf ','; printf '"%s"' "$(tr -d '\n' <"$PD/$k.ok" 2>/dev/null | md5sum | cut -c1-32)"; done
+      printf ']}\n'; } >"$WORK/complete.json"
+    missing=$(seq 1 "$NPARTS" | while read -r k; do [ -f "$PD/$k.ok" ] || echo x; done | wc -l)
+    [ "$missing" -gt 0 ] && continue
+    code=$(rxretry 200 POST "/v1/jobs/$JOB/complete" "$WORK/complete.resp" -H 'Content-Type: application/json' --data-binary @"$WORK/complete.json")
+    [ "$code" = 200 ] && { ok=1; break; }
+    [ "$code" = 409 ] || die "complete $JOB: HTTP $code $(head -c 300 "$WORK/complete.resp")"
+    log "receiver lacks $(jq -r .count "$WORK/complete.resp") parts of disk $i — sending them again"
+    for k in $(jq -r '.parts[]' "$WORK/complete.resp"); do rm -f "${PD:?}/$k.ok" "${PD:?}/$k.have"; done
+  done
+  t1=$(date +%s); kill "$PPID_MON" 2>/dev/null || true; PPID_MON=
+  [ "$ok" = 1 ] || die "disk $i ${D_DEV[i]}: transfer incomplete after 3 rounds"
+  dt=$((t1 - t0)); [ $dt -gt 0 ] || dt=1
+  read -r sentb dblk zblk sent < <(cat "$PD"/*.sent 2>/dev/null | awk '{b += $1; d += $2; z += $3; n++} END {printf "%.0f %d %d %d\n", b, d, z, n}')
+  retries=$(cat "$PD/retries" 2>/dev/null | wc -l || true)
+  log "disk $i ${D_DEV[i]} done in $dt s: $sent of $NPARTS parts changed, blocks: $dblk sent, $zblk zero; $(( sentb / 1048576 )) MiB on the wire ($(( sentb / 1048576 / dt )) MiB/s), disk read $(( DISK_BYTES / 1048576 / dt )) MiB/s, retries $retries, busy $(cat "$PD/busy" 2>/dev/null | wc -l)"
+  T_SENTB=$((T_SENTB + sentb)); T_SENT=$((T_SENT + sent)); T_DBLK=$((T_DBLK + dblk)); T_ZBLK=$((T_ZBLK + zblk)); T_RETRIES=$((T_RETRIES + retries))
+}
+
 T0=$(date +%s)
-( exec 9>&-; while sleep 30; do   # fd 9 = lock: a leftover sleep must not hold it
-    n=$(ls "$WORK/parts" | grep -c '\.ok$' || true); dt=$(( $(date +%s) - T0 ))
-    b=$(cat "$WORK"/parts/*.sent 2>/dev/null | awk '{s += $1} END {printf "%.0f", s / 1048576}')
-    log "progress: $n/$NPARTS parts checked, $b MiB sent, $(( b / (dt > 0 ? dt : 1) )) MiB/s, retries $(cat "$WORK/parts/retries" 2>/dev/null | wc -l)"
-  done ) & PPID_MON=$!
-for round in 1 2 3; do
-  seq 1 "$NPARTS" | while read -r k; do [ -f "$WORK/parts/$k.ok" ] || echo "$k"; done >"$WORK/todo"
-  [ -s "$WORK/todo" ] || break
-  xargs -P "$THREADS" -n 1 bash -c 'do_part "$1"' _ <"$WORK/todo" & XPID=$!
-  wait "$XPID" || log "round $round: some parts failed, $(seq 1 "$NPARTS" | while read -r k; do [ -f "$WORK/parts/$k.ok" ] || echo x; done | wc -l) left"
-  XPID=
-  # the receiver confirms the whole disk; parts it lacks (or has with another MD5) are sent again
-  # per part: MD5 of its block list "md5,md5,..." (the receiver computes the same from its journal)
-  { printf '{"snapshot_time":"%s","sent":%s,"part_md5":[' "$T_SNAP" "$(ls "$WORK/parts" | grep -c '\.sent$' || true)"
-    for k in $(seq 1 "$NPARTS"); do [ "$k" -gt 1 ] && printf ','; printf '"%s"' "$(tr -d '\n' <"$WORK/parts/$k.ok" 2>/dev/null | md5sum | cut -c1-32)"; done
-    printf ']}\n'; } >"$WORK/complete.json"
-  missing=$(seq 1 "$NPARTS" | while read -r k; do [ -f "$WORK/parts/$k.ok" ] || echo x; done | wc -l)
-  [ "$missing" -gt 0 ] && continue
-  code=$(rxretry 200 POST "/v1/jobs/$JOB/complete" "$WORK/complete.resp" -H 'Content-Type: application/json' --data-binary @"$WORK/complete.json")
-  [ "$code" = 200 ] && { DONE=1; break; }
-  [ "$code" = 409 ] || die "complete: HTTP $code $(head -c 300 "$WORK/complete.resp")"
-  log "receiver lacks $(jq -r .count "$WORK/complete.resp") parts — sending them again"
-  for k in $(jq -r '.parts[]' "$WORK/complete.resp"); do rm -f "$WORK/parts/$k.ok" "$WORK/parts/$k.have"; done
-done
-T1=$(date +%s); kill "$PPID_MON" 2>/dev/null || true; PPID_MON=
-[ "${DONE:-0}" = 1 ] || die "transfer incomplete after 3 rounds"
-dt=$((T1 - T0)); [ $dt -gt 0 ] || dt=1
-read -r SENTB DBLK ZBLK SENT < <(cat "$WORK"/parts/*.sent 2>/dev/null | awk '{b += $1; d += $2; z += $3; n++} END {printf "%.0f %d %d %d\n", b, d, z, n}')
-log "pass $PASS done in $dt s: $SENT of $NPARTS parts changed, blocks: $DBLK sent, $ZBLK zero; $(( SENTB / 1048576 )) MiB on the wire ($(( SENTB / 1048576 / dt )) MiB/s), disk read $(( DISK_BYTES / 1048576 / dt )) MiB/s, retries $(cat "$WORK/parts/retries" 2>/dev/null | wc -l), busy $(cat "$WORK/parts/busy" 2>/dev/null | wc -l)"
-log "OK: receiver confirmed all $NPARTS parts, snapshot $T_SNAP"
+for i in "${!D_DEV[@]}"; do send_disk "$i"; done
+dt=$(( $(date +%s) - T0 )); [ $dt -gt 0 ] || dt=1
+log "pass $PASS done in $dt s: $ND disk(s), $T_SENT of $TOTAL_PARTS parts changed, blocks: $T_DBLK sent, $T_ZBLK zero; $(( T_SENTB / 1048576 )) MiB on the wire ($(( T_SENTB / 1048576 / dt )) MiB/s), disk read $(( TOTAL_BYTES / 1048576 / dt )) MiB/s, retries $T_RETRIES"
+log "OK: receiver confirmed all $TOTAL_PARTS parts of $ND disk(s), snapshot set $T_SNAP"
 # a pass run by hand is reported too (the poller reports its own runs)
-[ -n "${D2G_POLLED:-}" ] || report "" pass 0 "pass $PASS done in $dt s: $SENT parts changed, $(( SENTB / 1048576 )) MiB sent via $RX_PATH" ""
+[ -n "${D2G_POLLED:-}" ] || report "" pass 0 "pass $PASS done in $dt s: $ND disk(s), $T_SENT parts changed, $(( T_SENTB / 1048576 )) MiB sent via $RX_PATH" ""
